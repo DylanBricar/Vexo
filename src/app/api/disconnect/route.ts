@@ -23,6 +23,12 @@ export async function POST(req: NextRequest) {
       WHERE user_id = ${userId}
     `;
 
+    await sql`
+      DELETE FROM messages
+      WHERE is_read = TRUE AND media_type IS DISTINCT FROM 'system'
+        AND (hidden = FALSE OR hidden IS NULL)
+    `;
+
     let systemMsgId: number | null = null;
     if (userLabel) {
       const result = await sql`
