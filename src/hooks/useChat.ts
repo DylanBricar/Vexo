@@ -41,6 +41,7 @@ export function useChat() {
   const tokenRef = useRef<string>("");
   const isLoadingMoreRef = useRef(false);
   const tabVisibleRef = useRef(true);
+  const justSentRef = useRef(false);
   const canBypass = userId === 1;
 
   const authHeaders = (extra?: Record<string, string>) => ({ Authorization: `Bearer ${tokenRef.current}`, "Content-Type": "application/json", ...extra });
@@ -165,7 +166,9 @@ export function useChat() {
     const el = scrollRef.current?.querySelector("[data-radix-scroll-area-viewport]");
     if (!el) return;
     const isNearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 150;
-    if (isNearBottom || messages.length <= 50) {
+    const shouldScroll = isNearBottom || messages.length <= 50 || justSentRef.current;
+    if (justSentRef.current) justSentRef.current = false;
+    if (shouldScroll) {
       const doScroll = () => { el.scrollTop = el.scrollHeight; };
       doScroll();
       const t = setTimeout(doScroll, 100);
@@ -272,6 +275,7 @@ export function useChat() {
     if ((!newMessage.trim() && !mediaPreview) || sending) return;
     setSending(true);
     sendTyping(false);
+    justSentRef.current = true;
     try {
       const res = await fetch("/api/messages", {
         method: "POST", headers: authHeaders(),
