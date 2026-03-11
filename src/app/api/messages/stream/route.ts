@@ -36,10 +36,17 @@ export async function GET(req: NextRequest) {
         if (cancelled) return;
 
         try {
-          await sql`
-            UPDATE messages SET is_read = TRUE
-            WHERE sender_id != ${uid} AND is_read = FALSE AND (hidden = FALSE OR hidden IS NULL)
+          const presence = await sql`
+            SELECT is_tab_visible FROM presence WHERE user_id = ${uid}
           `;
+          const isTabVisible = presence.length > 0 && presence[0].is_tab_visible;
+
+          if (isTabVisible) {
+            await sql`
+              UPDATE messages SET is_read = TRUE
+              WHERE sender_id != ${uid} AND is_read = FALSE AND (hidden = FALSE OR hidden IS NULL)
+            `;
+          }
 
           const messages = await sql`
             SELECT id, sender_id, content, (media IS NOT NULL) as has_media, media_type, is_read, created_at, reply_to, edited
@@ -76,8 +83,8 @@ export async function GET(req: NextRequest) {
           }
 
           const other = await sql`
-            SELECT u.label, p.is_online, p.is_typing,
-              (p.is_online AND p.last_seen > NOW() - INTERVAL '5 seconds') AS really_online
+            SELECT u.label, p.is_online, p.is_typing, p.is_tab_visible,
+              (p.is_online AND p.is_tab_visible AND p.last_seen > NOW() - INTERVAL '8 seconds') AS really_online
             FROM presence p
             JOIN users u ON u.id = p.user_id
             WHERE p.user_id != ${uid}

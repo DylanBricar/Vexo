@@ -9,8 +9,8 @@ export async function GET(req: NextRequest) {
     if (!uid) return NextResponse.json({ error: "Non autorisé" }, { status: 401 });
 
     const other = await sql`
-      SELECT u.label, p.is_online, p.is_typing,
-        (p.is_online AND p.last_seen > NOW() - INTERVAL '5 seconds') AS really_online
+      SELECT u.label, p.is_online, p.is_typing, p.is_tab_visible,
+        (p.is_online AND p.is_tab_visible AND p.last_seen > NOW() - INTERVAL '8 seconds') AS really_online
       FROM presence p
       JOIN users u ON u.id = p.user_id
       WHERE p.user_id != ${uid}
@@ -39,13 +39,13 @@ export async function POST(req: NextRequest) {
     const userId = h?.startsWith("Bearer ") ? verifyToken(h.slice(7)) : null;
     if (!userId) return NextResponse.json({ error: "Non autorisé" }, { status: 401 });
 
-    const { isTyping } = await req.json();
+    const { isTyping, isTabVisible } = await req.json();
 
     await sql`
-      INSERT INTO presence (user_id, is_online, is_typing, last_seen)
-      VALUES (${userId}, TRUE, ${isTyping || false}, NOW())
+      INSERT INTO presence (user_id, is_online, is_typing, is_tab_visible, last_seen)
+      VALUES (${userId}, TRUE, ${isTyping || false}, ${isTabVisible ?? false}, NOW())
       ON CONFLICT (user_id)
-      DO UPDATE SET is_online = TRUE, is_typing = ${isTyping || false}, last_seen = NOW()
+      DO UPDATE SET is_online = TRUE, is_typing = ${isTyping || false}, is_tab_visible = ${isTabVisible ?? false}, last_seen = NOW()
     `;
 
     return NextResponse.json({ ok: true });

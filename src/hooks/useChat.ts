@@ -39,6 +39,8 @@ export function useChat() {
   const beaconSentRef = useRef(false);
   const lastScreenshotAlert = useRef<number>(0);
   const tokenRef = useRef<string>("");
+  const isLoadingMoreRef = useRef(false);
+  const tabVisibleRef = useRef(true);
   const canBypass = userId === 1;
 
   const authHeaders = (extra?: Record<string, string>) => ({ Authorization: `Bearer ${tokenRef.current}`, "Content-Type": "application/json", ...extra });
@@ -130,15 +132,26 @@ export function useChat() {
 
   useEffect(() => {
     if (!userId) return;
-    const heartbeat = () => { fetch("/api/presence", { method: "POST", headers: authHeaders(), body: JSON.stringify({ isTyping: false }) }).catch(() => {}); };
+    tabVisibleRef.current = document.visibilityState === "visible";
+    const heartbeat = () => {
+      fetch("/api/presence", { method: "POST", headers: authHeaders(), body: JSON.stringify({ isTyping: false, isTabVisible: tabVisibleRef.current }) }).catch(() => {});
+    };
+    const onVisChange = () => {
+      tabVisibleRef.current = document.visibilityState === "visible";
+      heartbeat();
+    };
+    document.addEventListener("visibilitychange", onVisChange);
     heartbeat();
     heartbeatRef.current = setInterval(heartbeat, 3000);
-    return () => { if (heartbeatRef.current) clearInterval(heartbeatRef.current); };
+    return () => {
+      document.removeEventListener("visibilitychange", onVisChange);
+      if (heartbeatRef.current) clearInterval(heartbeatRef.current);
+    };
   }, [userId]);
 
   const sendTyping = useCallback((isTyping: boolean) => {
     if (!userId) return;
-    fetch("/api/presence", { method: "POST", headers: authHeaders(), body: JSON.stringify({ isTyping }) }).catch(() => {});
+    fetch("/api/presence", { method: "POST", headers: authHeaders(), body: JSON.stringify({ isTyping, isTabVisible: tabVisibleRef.current }) }).catch(() => {});
   }, [userId]);
 
   const handleInputChange = (value: string) => {
@@ -148,8 +161,16 @@ export function useChat() {
   };
 
   useEffect(() => {
-    const doScroll = () => { const el = scrollRef.current?.querySelector("[data-radix-scroll-area-viewport]"); if (el) el.scrollTop = el.scrollHeight; };
-    doScroll(); const t = setTimeout(doScroll, 100); return () => clearTimeout(t);
+    if (isLoadingMoreRef.current) return;
+    const el = scrollRef.current?.querySelector("[data-radix-scroll-area-viewport]");
+    if (!el) return;
+    const isNearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 150;
+    if (isNearBottom || messages.length <= 50) {
+      const doScroll = () => { el.scrollTop = el.scrollHeight; };
+      doScroll();
+      const t = setTimeout(doScroll, 100);
+      return () => clearTimeout(t);
+    }
   }, [messages]);
 
   useEffect(() => {
@@ -191,6 +212,9 @@ export function useChat() {
   const loadMore = async () => {
     if (!userId || loadingMore || messages.length === 0) return;
     setLoadingMore(true);
+    isLoadingMoreRef.current = true;
+    const el = scrollRef.current?.querySelector("[data-radix-scroll-area-viewport]");
+    const prevScrollHeight = el?.scrollHeight ?? 0;
     try {
       const oldestId = messages[0].id;
       const res = await fetch(`/api/messages?before=${oldestId}`, { headers: { Authorization: `Bearer ${tokenRef.current}` } });
@@ -203,11 +227,17 @@ export function useChat() {
         setMessages((prev) => [...older, ...prev]);
         for (const m of older) prevMsgIdsRef.current.add(m.id);
         setHasMore(!!data.hasMore);
+        requestAnimationFrame(() => {
+          if (el) el.scrollTop = el.scrollHeight - prevScrollHeight;
+          isLoadingMoreRef.current = false;
+        });
       } else {
         setHasMore(false);
+        isLoadingMoreRef.current = false;
       }
     } catch {
       showError("Erreur lors du chargement");
+      isLoadingMoreRef.current = false;
     }
     setLoadingMore(false);
   };

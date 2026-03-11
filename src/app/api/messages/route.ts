@@ -25,11 +25,6 @@ export async function GET(req: NextRequest) {
     if (!uid) return NextResponse.json({ error: "Non autorisé" }, { status: 401 });
     const before = req.nextUrl.searchParams.get("before");
 
-    await sql`
-      UPDATE messages SET is_read = TRUE
-      WHERE sender_id != ${uid} AND is_read = FALSE AND (hidden = FALSE OR hidden IS NULL)
-    `;
-
     let messages;
     if (before && !isNaN(Number(before))) {
       messages = await sql`

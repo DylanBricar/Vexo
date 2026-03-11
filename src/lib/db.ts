@@ -29,6 +29,12 @@ export async function initDB() {
   if (tables.length === 3) {
     const users = await sql`SELECT COUNT(*) as count FROM users`;
     if (Number(users[0].count) > 0) {
+      await sql`
+        DO $$ BEGIN
+          ALTER TABLE presence ADD COLUMN IF NOT EXISTS is_tab_visible BOOLEAN DEFAULT FALSE;
+        EXCEPTION WHEN duplicate_column THEN NULL;
+        END $$
+      `;
       dbReady = true;
       return;
     }
@@ -87,6 +93,13 @@ export async function initDB() {
   await sql`
     DO $$ BEGIN
       ALTER TABLE messages ADD COLUMN IF NOT EXISTS hidden BOOLEAN DEFAULT FALSE;
+    EXCEPTION WHEN duplicate_column THEN NULL;
+    END $$
+  `;
+
+  await sql`
+    DO $$ BEGIN
+      ALTER TABLE presence ADD COLUMN IF NOT EXISTS is_tab_visible BOOLEAN DEFAULT FALSE;
     EXCEPTION WHEN duplicate_column THEN NULL;
     END $$
   `;

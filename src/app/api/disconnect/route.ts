@@ -19,7 +19,7 @@ export async function POST(req: NextRequest) {
     }
 
     await sql`
-      UPDATE presence SET is_online = FALSE, is_typing = FALSE, last_seen = NOW()
+      UPDATE presence SET is_online = FALSE, is_typing = FALSE, is_tab_visible = FALSE, last_seen = NOW()
       WHERE user_id = ${userId}
     `;
 
@@ -37,17 +37,6 @@ export async function POST(req: NextRequest) {
       if (systemMsgId) {
         await new Promise((r) => setTimeout(r, 60000));
         await sql`DELETE FROM messages WHERE id = ${systemMsgId} AND media_type = 'system'`;
-      }
-
-      await new Promise((r) => setTimeout(r, 5000));
-
-      const online = await sql`
-        SELECT COUNT(*) as count FROM presence
-        WHERE is_online = TRUE AND last_seen > NOW() - INTERVAL '15 seconds'
-      `;
-
-      if (Number(online[0].count) === 0) {
-        await sql`DELETE FROM messages`;
       }
     });
 
