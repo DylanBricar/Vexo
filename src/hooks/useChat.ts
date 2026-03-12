@@ -42,6 +42,7 @@ export function useChat() {
   const isLoadingMoreRef = useRef(false);
   const tabVisibleRef = useRef(true);
   const justSentRef = useRef(false);
+  const userScrolledUpRef = useRef(false);
   const canBypass = userId === 1;
 
   const authHeaders = (extra?: Record<string, string>) => ({ Authorization: `Bearer ${tokenRef.current}`, "Content-Type": "application/json", ...extra });
@@ -161,17 +162,33 @@ export function useChat() {
     typingTimeoutRef.current = setTimeout(() => sendTyping(false), 2000);
   };
 
+  // Track user scroll: if they scroll up manually, stop auto-scrolling
+  useEffect(() => {
+    const el = scrollRef.current?.querySelector("[data-radix-scroll-area-viewport]");
+    if (!el) return;
+    const onScroll = () => {
+      if (isLoadingMoreRef.current) return;
+      const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+      userScrolledUpRef.current = distFromBottom > 200;
+    };
+    el.addEventListener("scroll", onScroll);
+    return () => el.removeEventListener("scroll", onScroll);
+  }, [userId]);
+
+  // Auto-scroll to bottom when messages change
   useEffect(() => {
     if (isLoadingMoreRef.current) return;
     const el = scrollRef.current?.querySelector("[data-radix-scroll-area-viewport]");
     if (!el) return;
-    const isNearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 150;
-    const shouldScroll = isNearBottom || messages.length <= 50 || justSentRef.current;
-    if (justSentRef.current) justSentRef.current = false;
-    if (shouldScroll) {
+    if (justSentRef.current) {
+      justSentRef.current = false;
+      userScrolledUpRef.current = false;
+    }
+    if (!userScrolledUpRef.current) {
       const doScroll = () => { el.scrollTop = el.scrollHeight; };
       doScroll();
-      const t = setTimeout(doScroll, 100);
+      requestAnimationFrame(doScroll);
+      const t = setTimeout(doScroll, 150);
       return () => clearTimeout(t);
     }
   }, [messages]);

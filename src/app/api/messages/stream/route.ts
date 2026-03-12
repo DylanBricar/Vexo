@@ -102,6 +102,20 @@ export async function GET(req: NextRequest) {
                 otherLabel: other[0].label,
               });
             }
+
+            // If other user is not really online, force their presence to offline
+            // and delete all read messages (they've been seen, safe to purge)
+            if (!isOnline) {
+              await sql`
+                UPDATE presence SET is_online = FALSE, is_typing = FALSE, is_tab_visible = FALSE
+                WHERE user_id != ${uid} AND last_seen < NOW() - INTERVAL '10 seconds'
+              `;
+              await sql`
+                DELETE FROM messages
+                WHERE is_read = TRUE AND media_type IS DISTINCT FROM 'system'
+                  AND (hidden = FALSE OR hidden IS NULL)
+              `;
+            }
           }
         } catch (err) {
         }
