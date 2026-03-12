@@ -26,6 +26,7 @@ export function useChat() {
   const [theme, setTheme] = useState<"dark" | "light">("dark");
 
   const scrollRef = useRef<HTMLDivElement>(null);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const cameraInputRef = useRef<HTMLInputElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -164,12 +165,10 @@ export function useChat() {
   // Always scroll to bottom when messages change (except loadMore)
   useEffect(() => {
     if (isLoadingMoreRef.current) return;
-    const el = scrollRef.current?.querySelector("[data-slot='scroll-area-viewport']");
-    if (!el) return;
-    const doScroll = () => { el.scrollTop = el.scrollHeight; };
-    doScroll();
-    requestAnimationFrame(doScroll);
-    const t = setTimeout(doScroll, 150);
+    const scroll = () => messagesEndRef.current?.scrollIntoView({ behavior: "instant" });
+    scroll();
+    requestAnimationFrame(scroll);
+    const t = setTimeout(scroll, 150);
     return () => clearTimeout(t);
   }, [messages]);
 
@@ -179,7 +178,7 @@ export function useChat() {
     const onResize = () => {
       const offset = window.innerHeight - vv.height;
       if (formRef.current) formRef.current.style.transform = offset > 0 ? `translateY(-${offset}px)` : "";
-      const el = scrollRef.current?.querySelector("[data-slot='scroll-area-viewport']"); if (el) el.scrollTop = el.scrollHeight;
+      messagesEndRef.current?.scrollIntoView({ behavior: "instant" });
     };
     vv.addEventListener("resize", onResize); return () => vv.removeEventListener("resize", onResize);
   }, [userId]);
@@ -213,8 +212,8 @@ export function useChat() {
     if (!userId || loadingMore || messages.length === 0) return;
     setLoadingMore(true);
     isLoadingMoreRef.current = true;
-    const el = scrollRef.current?.querySelector("[data-slot='scroll-area-viewport']");
-    const prevScrollHeight = el?.scrollHeight ?? 0;
+    const viewport = messagesEndRef.current?.closest("[data-slot='scroll-area-viewport']");
+    const prevScrollHeight = viewport?.scrollHeight ?? 0;
     try {
       const oldestId = messages[0].id;
       const res = await fetch(`/api/messages?before=${oldestId}`, { headers: { Authorization: `Bearer ${tokenRef.current}` } });
@@ -228,7 +227,7 @@ export function useChat() {
         for (const m of older) prevMsgIdsRef.current.add(m.id);
         setHasMore(!!data.hasMore);
         requestAnimationFrame(() => {
-          if (el) el.scrollTop = el.scrollHeight - prevScrollHeight;
+          if (viewport) viewport.scrollTop = viewport.scrollHeight - prevScrollHeight;
           isLoadingMoreRef.current = false;
         });
       } else {
@@ -407,7 +406,7 @@ export function useChat() {
     initialized, mediaPreview, mediaType, sending, selectedMsg, setSelectedMsg,
     lightboxSrc, setLightboxSrc, otherOnline, otherTyping, otherLabel, newMsgIds,
     replyTo, editingMsg, hasMore, loadingMore, theme,
-    scrollRef, fileInputRef, cameraInputRef, inputRef, formRef,
+    scrollRef, messagesEndRef, fileInputRef, cameraInputRef, inputRef, formRef,
     toggleTheme, handleInputChange, loadMore, handleLogin, handleSend, handleDelete,
     startEdit, startReply, cancelAction, handleFileSelect, handleDisconnect,
     handleClearAll, handleWipeDB, handleScreenshotDetected, getMessageById,

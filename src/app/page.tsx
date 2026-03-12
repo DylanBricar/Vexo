@@ -236,6 +236,8 @@ export default function Home() {
             );
           })}
 
+          <div ref={chat.messagesEndRef} />
+
           {chat.otherTyping && (
             <div className="flex justify-start">
               <div className="bg-muted rounded-2xl px-4 py-3 flex gap-1.5 items-center">
