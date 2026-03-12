@@ -316,7 +316,7 @@ export default function Home() {
               }
             }}
             placeholder={chat.editingMsg ? "Modifier le message..." : "Message..."}
-            className="flex-1 resize-none rounded-md bg-muted px-3 py-2.5 text-sm placeholder:text-muted-foreground focus:outline-none"
+            className="flex-1 resize-none rounded-md bg-muted px-3 py-2.5 text-sm placeholder:text-muted-foreground focus:outline-none min-h-[40px]"
             rows={1}
             autoFocus
             style={{ maxHeight: 120 }}

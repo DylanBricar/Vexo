@@ -42,7 +42,6 @@ export function useChat() {
   const isLoadingMoreRef = useRef(false);
   const tabVisibleRef = useRef(true);
   const justSentRef = useRef(false);
-  const userScrolledUpRef = useRef(false);
   const canBypass = userId === 1;
 
   const authHeaders = (extra?: Record<string, string>) => ({ Authorization: `Bearer ${tokenRef.current}`, "Content-Type": "application/json", ...extra });
@@ -162,35 +161,16 @@ export function useChat() {
     typingTimeoutRef.current = setTimeout(() => sendTyping(false), 2000);
   };
 
-  // Track user scroll: if they scroll up manually, stop auto-scrolling
-  useEffect(() => {
-    const el = scrollRef.current?.querySelector("[data-radix-scroll-area-viewport]");
-    if (!el) return;
-    const onScroll = () => {
-      if (isLoadingMoreRef.current) return;
-      const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-      userScrolledUpRef.current = distFromBottom > 200;
-    };
-    el.addEventListener("scroll", onScroll);
-    return () => el.removeEventListener("scroll", onScroll);
-  }, [userId]);
-
-  // Auto-scroll to bottom when messages change
+  // Always scroll to bottom when messages change (except loadMore)
   useEffect(() => {
     if (isLoadingMoreRef.current) return;
     const el = scrollRef.current?.querySelector("[data-radix-scroll-area-viewport]");
     if (!el) return;
-    if (justSentRef.current) {
-      justSentRef.current = false;
-      userScrolledUpRef.current = false;
-    }
-    if (!userScrolledUpRef.current) {
-      const doScroll = () => { el.scrollTop = el.scrollHeight; };
-      doScroll();
-      requestAnimationFrame(doScroll);
-      const t = setTimeout(doScroll, 150);
-      return () => clearTimeout(t);
-    }
+    const doScroll = () => { el.scrollTop = el.scrollHeight; };
+    doScroll();
+    requestAnimationFrame(doScroll);
+    const t = setTimeout(doScroll, 150);
+    return () => clearTimeout(t);
   }, [messages]);
 
   useEffect(() => {
@@ -305,6 +285,7 @@ export function useChat() {
       const data = await res.json();
       if (mediaPreview && data.message?.id) mediaCacheRef.current.set(data.message.id, mediaPreview);
       setNewMessage(""); setMediaPreview(null); setMediaType(null); setReplyTo(null);
+      if (inputRef.current) inputRef.current.style.height = "";
     } catch { showError("Erreur lors de l'envoi"); }
     setSending(false);
   };
