@@ -103,17 +103,11 @@ export async function GET(req: NextRequest) {
               });
             }
 
-            // If other user is not really online, force their presence to offline
-            // and delete all read messages (they've been seen, safe to purge)
+            // Force stale presence to offline (safety net if disconnect beacon failed)
             if (!isOnline) {
               await sql`
                 UPDATE presence SET is_online = FALSE, is_typing = FALSE, is_tab_visible = FALSE
                 WHERE user_id != ${uid} AND last_seen < NOW() - INTERVAL '10 seconds'
-              `;
-              await sql`
-                DELETE FROM messages
-                WHERE is_read = TRUE AND media_type IS DISTINCT FROM 'system'
-                  AND (hidden = FALSE OR hidden IS NULL)
               `;
             }
           }
