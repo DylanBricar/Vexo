@@ -164,7 +164,7 @@ export function useChat() {
   // Always scroll to bottom when messages change (except loadMore)
   useEffect(() => {
     if (isLoadingMoreRef.current) return;
-    const el = scrollRef.current?.querySelector("[data-slot="scroll-area-viewport"]");
+    const el = scrollRef.current?.querySelector("[data-slot='scroll-area-viewport']");
     if (!el) return;
     const doScroll = () => { el.scrollTop = el.scrollHeight; };
     doScroll();
@@ -179,7 +179,7 @@ export function useChat() {
     const onResize = () => {
       const offset = window.innerHeight - vv.height;
       if (formRef.current) formRef.current.style.transform = offset > 0 ? `translateY(-${offset}px)` : "";
-      const el = scrollRef.current?.querySelector("[data-slot="scroll-area-viewport"]"); if (el) el.scrollTop = el.scrollHeight;
+      const el = scrollRef.current?.querySelector("[data-slot='scroll-area-viewport']"); if (el) el.scrollTop = el.scrollHeight;
     };
     vv.addEventListener("resize", onResize); return () => vv.removeEventListener("resize", onResize);
   }, [userId]);
@@ -213,7 +213,7 @@ export function useChat() {
     if (!userId || loadingMore || messages.length === 0) return;
     setLoadingMore(true);
     isLoadingMoreRef.current = true;
-    const el = scrollRef.current?.querySelector("[data-slot="scroll-area-viewport"]");
+    const el = scrollRef.current?.querySelector("[data-slot='scroll-area-viewport']");
     const prevScrollHeight = el?.scrollHeight ?? 0;
     try {
       const oldestId = messages[0].id;
