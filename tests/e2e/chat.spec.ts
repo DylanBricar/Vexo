@@ -13,7 +13,9 @@ const initialMessage = {
   edited: false,
 };
 
-test("le champ de connexion est utilisable sans attendre l'initialisation", async ({ page }) => {
+test("le champ de connexion est utilisable sans attendre l'initialisation", async ({
+  page,
+}) => {
   await page.route("**/api/init", async (route) => {
     await new Promise((resolve) => setTimeout(resolve, 2_000));
     await route.fulfill({ status: 200, json: { ok: true } });
@@ -21,7 +23,9 @@ test("le champ de connexion est utilisable sans attendre l'initialisation", asyn
 
   await page.goto("/");
 
-  await expect(page.getByPlaceholder("Mot de passe")).toBeEnabled({ timeout: 300 });
+  await expect(page.getByPlaceholder("Mot de passe")).toBeEnabled({
+    timeout: 300,
+  });
 });
 
 test("l'envoi est optimiste et affiche la date complete", async ({ page }) => {
@@ -32,30 +36,62 @@ test("l'envoi est optimiste et affiche la date complete", async ({ page }) => {
 
   const composer = page.getByPlaceholder("Message...");
   await composer.fill("Message instantané");
-  await page.locator('form').last().locator('button[type="submit"]').click();
+  await page.locator("form").last().locator('button[type="submit"]').click();
 
   await expect(composer).toHaveValue("", { timeout: 300 });
-  await expect(page.getByText("Message instantané")).toBeVisible({ timeout: 300 });
+  await expect(page.getByText("Message instantané")).toBeVisible({
+    timeout: 300,
+  });
 });
 
-test("le chat ne deborde pas sur un petit mobile", async ({ page }) => {
-  await page.setViewportSize({ width: 320, height: 568 });
+for (const viewport of [
+  { width: 320, height: 568 },
+  { width: 375, height: 667 },
+  { width: 768, height: 1_024 },
+]) {
+  test(`le chat ne deborde pas a ${viewport.width}px`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await mockChat(page, 0);
+    await login(page);
+
+    const dimensions = await page.evaluate(() => ({
+      clientWidth: document.documentElement.clientWidth,
+      scrollWidth: document.documentElement.scrollWidth,
+    }));
+    expect(dimensions.scrollWidth).toBeLessThanOrEqual(dimensions.clientWidth);
+
+    const viewportMeta = page.locator('meta[name="viewport"]');
+    await expect(viewportMeta).not.toHaveAttribute(
+      "content",
+      /user-scalable=no|maximum-scale=1/,
+    );
+  });
+}
+
+test("l'ecran de connexion respecte les controles WCAG automatisables", async ({
+  page,
+}) => {
+  await page.route("**/api/init", (route) =>
+    route.fulfill({ status: 200, json: { ok: true } }),
+  );
+  await page.goto("/");
+
+  const results = await new AxeBuilder({ page }).analyze();
+  expect(results.violations).toEqual([]);
+});
+
+test("la conversation respecte les controles WCAG automatisables", async ({
+  page,
+}) => {
+  const browserErrors: string[] = [];
+  page.on("console", (message) => {
+    if (message.type() === "error") browserErrors.push(message.text());
+  });
+  page.on("pageerror", (error) => browserErrors.push(error.message));
   await mockChat(page, 0);
   await login(page);
-
-  const dimensions = await page.evaluate(() => ({
-    clientWidth: document.documentElement.clientWidth,
-    scrollWidth: document.documentElement.scrollWidth,
-  }));
-  expect(dimensions.scrollWidth).toBeLessThanOrEqual(dimensions.clientWidth);
-
-  const viewport = page.locator('meta[name="viewport"]');
-  await expect(viewport).not.toHaveAttribute("content", /user-scalable=no|maximum-scale=1/);
-});
-
-test("l'ecran de connexion respecte les controles WCAG automatisables", async ({ page }) => {
-  await page.route("**/api/init", (route) => route.fulfill({ status: 200, json: { ok: true } }));
-  await page.goto("/");
+  await page.waitForTimeout(100);
+  expect(browserErrors).toEqual([]);
 
   const results = await new AxeBuilder({ page }).analyze();
   expect(results.violations).toEqual([]);
@@ -69,23 +105,32 @@ async function login(page: Page) {
 }
 
 async function mockChat(page: Page, postDelayMs: number) {
-  await page.route("**/api/init", (route) => route.fulfill({ status: 200, json: { ok: true } }));
-  await page.route("**/api/auth", (route) => route.fulfill({
-    status: 200,
-    json: { userId: 1, label: "Utilisateur 1", token: "test-token" },
-  }));
-  await page.route("**/api/presence", (route) => route.fulfill({ status: 200, json: { ok: true } }));
-  await page.route("**/api/messages/stream*", (route) => route.fulfill({
-    status: 200,
-    contentType: "text/event-stream",
-    body: `event: messages\ndata: ${JSON.stringify({ messages: [initialMessage], hasMore: false })}\n\n`,
-  }));
+  await page.route("**/api/init", (route) =>
+    route.fulfill({ status: 200, json: { ok: true } }),
+  );
+  await page.route("**/api/auth", (route) =>
+    route.fulfill({
+      status: 200,
+      json: { userId: 1, label: "Utilisateur 1" },
+    }),
+  );
+  await page.route("**/api/presence", (route) =>
+    route.fulfill({ status: 200, json: { ok: true } }),
+  );
+  await page.route("**/api/messages/stream*", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "text/event-stream",
+      body: `event: messages\ndata: ${JSON.stringify({ messages: [initialMessage], hasMore: false })}\n\n`,
+    }),
+  );
   await page.route("**/api/messages", async (route) => {
     if (route.request().method() !== "POST") {
       await route.continue();
       return;
     }
-    if (postDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, postDelayMs));
+    if (postDelayMs > 0)
+      await new Promise((resolve) => setTimeout(resolve, postDelayMs));
     const requestBody = route.request().postDataJSON();
     await route.fulfill({
       status: 200,

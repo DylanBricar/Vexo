@@ -9,4 +9,6 @@ export interface Message {
   created_at: string;
   reply_to: number | null;
   edited: boolean;
+  pending?: boolean;
+  localOnly?: boolean;
 }

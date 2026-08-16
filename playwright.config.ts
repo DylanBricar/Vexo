@@ -25,7 +25,8 @@ export default defineConfig({
     timeout: 120_000,
     env: {
       DATABASE_URL: "postgresql://test:test@127.0.0.1:5432/test",
-      ENCRYPTION_KEY: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      ENCRYPTION_KEY:
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
       USER1_PASSWORD: "test-user-1-password",
       USER2_PASSWORD: "test-user-2-password",
     },

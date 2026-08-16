@@ -1,36 +1,56 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Vexo
 
-## Getting Started
+Vexo est un chat privé à deux utilisateurs construit avec Next.js 16, React 19, Neon PostgreSQL et Tailwind CSS 4. Les messages texte et les médias sont chiffrés avant stockage. L'interface utilise un flux SSE pour synchroniser les messages, la lecture, la présence et l'indicateur de saisie.
 
-First, run the development server:
+## Architecture
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+```text
+src/app/page.tsx              -> point d'entrée client
+src/components/chat/          -> connexion, en-tête, messages et compositeur
+src/hooks/useChat.ts          -> état et orchestration temps réel
+src/app/api/auth/             -> connexion et cookie de session HttpOnly
+src/app/api/messages/         -> historique, envoi, édition et masquage
+src/app/api/messages/stream/  -> flux SSE sans polling concurrent
+src/app/api/presence/         -> présence et saisie
+src/lib/db.ts                 -> connexion Neon et migrations idempotentes
+src/lib/crypto.ts             -> AES-256-GCM et signature de session
+src/lib/session.ts            -> authentification et protection same-origin
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+La première tentative de connexion initialise ou migre le schéma. La limitation des tentatives est stockée dans PostgreSQL afin de rester cohérente entre les instances Vercel. Les messages lus sont supprimés lorsque l'un des participants quitte la conversation, conformément au comportement éphémère existant.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Configuration
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Prérequis: Node.js 24 et npm 10 ou plus récent.
 
-## Learn More
+```bash
+copy .env.example .env.local
+npm ci
+npm run dev
+```
 
-To learn more about Next.js, take a look at the following resources:
+Variables obligatoires:
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+- `DATABASE_URL`: chaîne PostgreSQL Neon;
+- `ENCRYPTION_KEY`: exactement 64 caractères hexadécimaux;
+- `USER1_PASSWORD` et `USER2_PASSWORD`: requis uniquement lors de la création initiale des utilisateurs, avec 12 caractères minimum.
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+Ne jamais changer `ENCRYPTION_KEY` sans procédure de rotation: les anciens messages ne pourraient plus être déchiffrés et les sessions seraient invalidées.
 
-## Deploy on Vercel
+## Qualité
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+```bash
+npm run lint
+npm run typecheck
+npm test
+npm run test:coverage
+npm run test:e2e
+npm run build
+npm audit
+```
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Les tests Playwright couvrent le champ de connexion immédiatement disponible, l'envoi optimiste malgré une API ralentie, la date complète, le viewport mobile et les contrôles WCAG automatisables.
+
+## Déploiement
+
+La branche `main` est destinée à Vercel. Le projet déclare Node.js 24 dans `package.json`; les secrets doivent être configurés dans les variables d'environnement Vercel. Après un push, vérifier le statut du déploiement, son alias de production et le parcours de connexion dans le navigateur.

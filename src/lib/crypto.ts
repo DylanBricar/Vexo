@@ -1,11 +1,32 @@
-import { createCipheriv, createDecipheriv, randomBytes, createHmac, timingSafeEqual } from "crypto";
+import {
+  createCipheriv,
+  createDecipheriv,
+  randomBytes,
+  createHmac,
+  timingSafeEqual,
+} from "crypto";
 
 const ALGORITHM = "aes-256-gcm";
-const KEY = Buffer.from(process.env.ENCRYPTION_KEY!, "hex");
+const TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
+const MAX_CLOCK_SKEW_MS = 60_000;
+let cachedKey: Buffer | null = null;
+
+function getEncryptionKey(): Buffer {
+  if (cachedKey) return cachedKey;
+  const configuredKey = process.env.ENCRYPTION_KEY;
+  if (!configuredKey || !/^[0-9a-f]{64}$/i.test(configuredKey)) {
+    throw new Error(
+      "ENCRYPTION_KEY doit contenir exactement 64 caractères hexadécimaux",
+    );
+  }
+  cachedKey = Buffer.from(configuredKey, "hex");
+  return cachedKey;
+}
 
 export function encrypt(text: string): string {
+  const key = getEncryptionKey();
   const iv = randomBytes(12);
-  const cipher = createCipheriv(ALGORITHM, KEY, iv);
+  const cipher = createCipheriv(ALGORITHM, key, iv);
   let encrypted = cipher.update(text, "utf8", "hex");
   encrypted += cipher.final("hex");
   const authTag = cipher.getAuthTag().toString("hex");
@@ -13,10 +34,11 @@ export function encrypt(text: string): string {
 }
 
 export function decrypt(data: string): string {
+  const key = getEncryptionKey();
   const [ivHex, authTagHex, ciphertext] = data.split(":");
   const iv = Buffer.from(ivHex, "hex");
   const authTag = Buffer.from(authTagHex, "hex");
-  const decipher = createDecipheriv(ALGORITHM, KEY, iv);
+  const decipher = createDecipheriv(ALGORITHM, key, iv);
   decipher.setAuthTag(authTag);
   let decrypted = decipher.update(ciphertext, "hex", "utf8");
   decrypted += decipher.final("utf8");
@@ -25,7 +47,9 @@ export function decrypt(data: string): string {
 
 export function generateToken(userId: number): string {
   const payload = `${userId}:${Date.now()}`;
-  const sig = createHmac("sha256", KEY).update(payload).digest("hex");
+  const sig = createHmac("sha256", getEncryptionKey())
+    .update(payload)
+    .digest("hex");
   return `${payload}:${sig}`;
 }
 
@@ -34,16 +58,26 @@ export function verifyToken(token: string): number | null {
   if (parts.length !== 3) return null;
   const [userIdStr, , sig] = parts;
   const payload = `${parts[0]}:${parts[1]}`;
-  const expected = createHmac("sha256", KEY).update(payload).digest("hex");
+  if (!/^[0-9a-f]{64}$/i.test(sig)) return null;
+  const expected = createHmac("sha256", getEncryptionKey())
+    .update(payload)
+    .digest("hex");
   try {
-    if (!timingSafeEqual(Buffer.from(sig, "hex"), Buffer.from(expected, "hex"))) return null;
+    if (!timingSafeEqual(Buffer.from(sig, "hex"), Buffer.from(expected, "hex")))
+      return null;
   } catch {
     return null;
   }
   const uid = Number(userIdStr);
-  if (isNaN(uid) || uid <= 0) return null;
+  if (!Number.isSafeInteger(uid) || uid <= 0) return null;
   const ts = Number(parts[1]);
-  if (isNaN(ts) || Date.now() - ts > 86400000) return null;
+  const age = Date.now() - ts;
+  if (
+    !Number.isSafeInteger(ts) ||
+    age > TOKEN_TTL_MS ||
+    age < -MAX_CLOCK_SKEW_MS
+  )
+    return null;
   return uid;
 }
 

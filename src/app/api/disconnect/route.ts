@@ -1,53 +1,55 @@
 import { NextRequest, NextResponse } from "next/server";
-import { after } from "next/server";
 import sql from "@/lib/db";
-import { encrypt, verifyToken } from "@/lib/crypto";
+import { encrypt } from "@/lib/crypto";
+import {
+  clearSessionCookie,
+  getAuthenticatedUserId,
+  isTrustedMutation,
+} from "@/lib/session";
 
-export async function POST(req: NextRequest) {
+export async function POST(request: NextRequest) {
+  if (!isTrustedMutation(request)) {
+    return NextResponse.json(
+      { error: "Origine non autorisée" },
+      { status: 403 },
+    );
+  }
+
   try {
-    let userId: number | null = null;
-    let userLabel: string | null = null;
+    const userId = getAuthenticatedUserId(request);
+    if (!userId)
+      return NextResponse.json({ error: "Non autorisé" }, { status: 401 });
 
-    try {
-      const body = await req.json();
-      const tokenUid = body.token ? verifyToken(body.token) : null;
-      if (!tokenUid) return NextResponse.json({ error: "Non autorisé" }, { status: 401 });
-      userId = tokenUid;
-      userLabel = body.userLabel;
-    } catch {
-      return NextResponse.json({ error: "Invalid" }, { status: 400 });
-    }
+    const users = await sql`SELECT label FROM users WHERE id = ${userId}`;
+    const label = typeof users[0]?.label === "string" ? users[0].label : null;
 
     await sql`
-      UPDATE presence SET is_online = FALSE, is_typing = FALSE, is_tab_visible = FALSE, last_seen = NOW()
+      UPDATE presence
+      SET is_online = FALSE, is_typing = FALSE, is_tab_visible = FALSE, last_seen = NOW()
       WHERE user_id = ${userId}
     `;
-
     await sql`
       DELETE FROM messages
       WHERE is_read = TRUE AND media_type IS DISTINCT FROM 'system'
         AND (hidden = FALSE OR hidden IS NULL)
     `;
+    await sql`DELETE FROM messages WHERE expires_at IS NOT NULL AND expires_at <= NOW()`;
 
-    let systemMsgId: number | null = null;
-    if (userLabel) {
-      const result = await sql`
-        INSERT INTO messages (sender_id, content, media_type)
-        VALUES (${userId}, ${encrypt(`${userLabel} a quitté la conversation`)}, 'system')
-        RETURNING id
+    if (label) {
+      await sql`
+        INSERT INTO messages (sender_id, content, media_type, expires_at)
+        VALUES (${userId}, ${encrypt(`${label} a quitté la conversation`)}, 'system', NOW() + INTERVAL '1 minute')
       `;
-      systemMsgId = result[0]?.id ?? null;
     }
 
-    after(async () => {
-      if (systemMsgId) {
-        await new Promise((r) => setTimeout(r, 60000));
-        await sql`DELETE FROM messages WHERE id = ${systemMsgId} AND media_type = 'system'`;
-      }
-    });
-
-    return NextResponse.json({ ok: true });
-  } catch {
-    return NextResponse.json({ error: "Failed" }, { status: 500 });
+    const response = NextResponse.json({ ok: true });
+    clearSessionCookie(response);
+    return response;
+  } catch (error) {
+    console.error("Échec de la déconnexion", error);
+    return NextResponse.json(
+      { error: "Impossible de se déconnecter" },
+      { status: 500 },
+    );
   }
 }

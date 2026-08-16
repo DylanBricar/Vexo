@@ -1,5 +1,12 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { mergeStreamMessages } from "@/lib/message-stream";
+import { validateSelectedFile } from "@/lib/message-validation";
 import type { Message } from "@/types";
+
+const JSON_HEADERS = { "Content-Type": "application/json" };
+const ERROR_DURATION_MS = 4_000;
+const TYPING_IDLE_MS = 1_500;
+const SCREENSHOT_NOTICE_COOLDOWN_MS = 10_000;
 
 export function useChat() {
   const [userId, setUserId] = useState<number | null>(null);
@@ -9,407 +16,747 @@ export function useChat() {
   const [newMessage, setNewMessage] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [initialized, setInitialized] = useState(false);
   const [mediaPreview, setMediaPreview] = useState<string | null>(null);
   const [mediaType, setMediaType] = useState<string | null>(null);
-  const [sending, setSending] = useState(false);
-  const [selectedMsg, setSelectedMsg] = useState<number | null>(null);
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
   const [otherOnline, setOtherOnline] = useState(false);
   const [otherTyping, setOtherTyping] = useState(false);
   const [otherLabel, setOtherLabel] = useState("");
-  const [newMsgIds, setNewMsgIds] = useState<Set<number>>(new Set());
+  const [newMsgIds, setNewMsgIds] = useState<Set<number>>(() => new Set());
   const [replyTo, setReplyTo] = useState<Message | null>(null);
   const [editingMsg, setEditingMsg] = useState<Message | null>(null);
   const [hasMore, setHasMore] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
+  const [savingEdit, setSavingEdit] = useState(false);
   const [theme, setTheme] = useState<"dark" | "light">("dark");
 
-  const scrollRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const cameraInputRef = useRef<HTMLInputElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
-  const formRef = useRef<HTMLFormElement>(null);
-  const sseRef = useRef<EventSource | null>(null);
+  const eventSourceRef = useRef<EventSource | null>(null);
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const heartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const typingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const prevMsgIdsRef = useRef<Set<number>>(new Set());
+  const errorTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const animationTimersRef = useRef<Set<ReturnType<typeof setTimeout>>>(
+    new Set(),
+  );
+  const previousMessageIdsRef = useRef<Set<number>>(new Set());
   const mediaCacheRef = useRef<Map<number, string>>(new Map());
   const mediaFetchingRef = useRef<Set<number>>(new Set());
   const beaconSentRef = useRef(false);
-  const lastScreenshotAlert = useRef<number>(0);
-  const tokenRef = useRef<string>("");
+  const lastScreenshotAlertRef = useRef(0);
   const isLoadingMoreRef = useRef(false);
   const tabVisibleRef = useRef(true);
-  const justSentRef = useRef(false);
+  const typingActiveRef = useRef(false);
+  const optimisticIdRef = useRef(-1);
   const canBypass = userId === 1;
 
-  const authHeaders = (extra?: Record<string, string>) => ({ Authorization: `Bearer ${tokenRef.current}`, "Content-Type": "application/json", ...extra });
-
-  const showError = useCallback((msg: string) => {
-    setError(msg); setTimeout(() => setError(""), 4000);
+  const showError = useCallback((message: string) => {
+    setError(message);
+    if (errorTimeoutRef.current) clearTimeout(errorTimeoutRef.current);
+    errorTimeoutRef.current = setTimeout(() => setError(""), ERROR_DURATION_MS);
   }, []);
 
   useEffect(() => {
-    const saved = localStorage.getItem("chat-theme") as "dark" | "light" | null;
-    if (saved) { setTheme(saved); document.documentElement.classList.toggle("dark", saved === "dark"); }
-  }, []);
-
-  const toggleTheme = () => {
-    const next = theme === "dark" ? "light" : "dark";
-    setTheme(next); localStorage.setItem("chat-theme", next);
-    document.documentElement.classList.toggle("dark", next === "dark");
-  };
-
-  useEffect(() => { fetch("/api/init", { method: "POST" }).then(() => setInitialized(true)).catch(() => setInitialized(true)); }, []);
-
-  const fetchMedia = useCallback((msgId: number, currentUserId: number) => {
-    if (mediaCacheRef.current.has(msgId) || mediaFetchingRef.current.has(msgId)) return;
-    mediaFetchingRef.current.add(msgId);
-    fetch(`/api/messages/media?id=${msgId}`, { headers: { Authorization: `Bearer ${tokenRef.current}` } })
-      .then((res) => res.json())
-      .then((data) => {
-        if (data.media) {
-          mediaCacheRef.current.set(msgId, data.media);
-          setMessages((prev) =>
-            prev.map((m) => (m.id === msgId ? { ...m, media: data.media } : m))
-          );
-        }
-      })
-      .catch(() => {})
-      .finally(() => mediaFetchingRef.current.delete(msgId));
-  }, []);
-
-  const processMessages = useCallback((incoming: Message[], currentUserId: number) => {
-    const prevIds = prevMsgIdsRef.current;
-    const newIds = new Set<number>();
-    const processed = incoming.map((msg) => {
-      if (!prevIds.has(msg.id) && msg.sender_id !== currentUserId && prevIds.size > 0) newIds.add(msg.id);
-      if (mediaCacheRef.current.has(msg.id)) return { ...msg, media: mediaCacheRef.current.get(msg.id)! };
-      if (msg.has_media && !msg.media) fetchMedia(msg.id, currentUserId);
-      return msg;
+    const savedTheme = localStorage.getItem("chat-theme");
+    const nextTheme = savedTheme === "light" ? "light" : "dark";
+    const frame = requestAnimationFrame(() => {
+      setTheme(nextTheme);
+      document.documentElement.classList.toggle("dark", nextTheme === "dark");
     });
-    const currentIds = new Set(incoming.map((m) => m.id));
-    for (const cachedId of mediaCacheRef.current.keys()) { if (!currentIds.has(cachedId)) mediaCacheRef.current.delete(cachedId); }
-    prevMsgIdsRef.current = currentIds;
-    setMessages(processed);
-    if (newIds.size > 0) {
-      setNewMsgIds((prev) => new Set([...prev, ...newIds]));
-      setTimeout(() => { setNewMsgIds((prev) => { const next = new Set(prev); for (const id of newIds) next.delete(id); return next; }); }, 3000);
-    }
-  }, [fetchMedia]);
+    return () => cancelAnimationFrame(frame);
+  }, []);
+
+  useEffect(
+    () => () => {
+      if (errorTimeoutRef.current) clearTimeout(errorTimeoutRef.current);
+      for (const timer of animationTimersRef.current) clearTimeout(timer);
+    },
+    [],
+  );
+
+  const toggleTheme = useCallback(() => {
+    setTheme((current) => {
+      const next = current === "dark" ? "light" : "dark";
+      localStorage.setItem("chat-theme", next);
+      document.documentElement.classList.toggle("dark", next === "dark");
+      return next;
+    });
+  }, []);
+
+  const fetchMedia = useCallback((messageId: number) => {
+    if (
+      mediaCacheRef.current.has(messageId) ||
+      mediaFetchingRef.current.has(messageId)
+    )
+      return;
+    mediaFetchingRef.current.add(messageId);
+    void fetch(`/api/messages/media?id=${messageId}`)
+      .then(async (response) => {
+        if (!response.ok) throw new Error("Média indisponible");
+        return response.json();
+      })
+      .then((data: { media?: unknown }) => {
+        if (typeof data.media !== "string") return;
+        mediaCacheRef.current.set(messageId, data.media);
+        setMessages((current) =>
+          current.map((message) =>
+            message.id === messageId
+              ? { ...message, media: data.media as string }
+              : message,
+          ),
+        );
+      })
+      .catch(() => undefined)
+      .finally(() => mediaFetchingRef.current.delete(messageId));
+  }, []);
+
+  const animateMessages = useCallback((messageIds: Set<number>) => {
+    if (messageIds.size === 0) return;
+    setNewMsgIds((current) => new Set([...current, ...messageIds]));
+    const timer = setTimeout(() => {
+      setNewMsgIds((current) => {
+        const next = new Set(current);
+        for (const id of messageIds) next.delete(id);
+        return next;
+      });
+      animationTimersRef.current.delete(timer);
+    }, 3_000);
+    animationTimersRef.current.add(timer);
+  }, []);
+
+  const processMessages = useCallback(
+    (incoming: Message[], currentUserId: number) => {
+      const previousIds = previousMessageIdsRef.current;
+      const incomingIds = new Set(incoming.map((message) => message.id));
+      const animatedIds = new Set<number>();
+      const processed = incoming.map((message) => {
+        if (
+          !previousIds.has(message.id) &&
+          message.sender_id !== currentUserId &&
+          previousIds.size > 0
+        ) {
+          animatedIds.add(message.id);
+        }
+        const cachedMedia = mediaCacheRef.current.get(message.id);
+        if (cachedMedia) return { ...message, media: cachedMedia };
+        if (message.has_media && !message.media) fetchMedia(message.id);
+        return message;
+      });
+
+      setMessages((current) => mergeStreamMessages(current, processed));
+      previousMessageIdsRef.current = incomingIds;
+      animateMessages(animatedIds);
+    },
+    [animateMessages, fetchMedia],
+  );
 
   useEffect(() => {
     if (!userId) return;
-    const url = `/api/messages/stream?token=${encodeURIComponent(tokenRef.current)}`;
+    let disposed = false;
+
     const connect = () => {
-      const es = new EventSource(url);
-      sseRef.current = es;
-      es.addEventListener("messages", (e) => {
+      if (disposed) return;
+      const eventSource = new EventSource("/api/messages/stream");
+      eventSourceRef.current = eventSource;
+      eventSource.addEventListener("messages", (event) => {
         try {
-          const data = JSON.parse(e.data);
-          if (data.messages) {
+          const data = JSON.parse(event.data) as {
+            messages?: Message[];
+            hasMore?: boolean;
+          };
+          if (Array.isArray(data.messages)) {
             processMessages(data.messages, userId);
-            setHasMore(!!data.hasMore);
+            setHasMore(Boolean(data.hasMore));
           }
-        } catch {}
+        } catch {
+          showError("Le flux de messages a envoyé une réponse invalide");
+        }
       });
-      es.addEventListener("presence", (e) => {
+      eventSource.addEventListener("presence", (event) => {
         try {
-          const data = JSON.parse(e.data);
-          setOtherOnline(data.otherOnline);
-          setOtherTyping(data.otherTyping);
-          setOtherLabel(data.otherLabel);
-        } catch {}
+          const data = JSON.parse(event.data) as Record<string, unknown>;
+          setOtherOnline(Boolean(data.otherOnline));
+          setOtherTyping(Boolean(data.otherTyping));
+          setOtherLabel(
+            typeof data.otherLabel === "string" ? data.otherLabel : "",
+          );
+        } catch {
+          showError("Le statut de présence est invalide");
+        }
       });
-      es.onerror = () => {
-        es.close();
-        setTimeout(() => { if (sseRef.current === es) connect(); }, 2000);
+      eventSource.onerror = () => {
+        eventSource.close();
+        if (!disposed) reconnectTimerRef.current = setTimeout(connect, 2_000);
       };
     };
+
     connect();
-    return () => { if (sseRef.current) { sseRef.current.close(); sseRef.current = null; } };
-  }, [userId, processMessages]);
+    return () => {
+      disposed = true;
+      if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+      eventSourceRef.current?.close();
+      eventSourceRef.current = null;
+    };
+  }, [processMessages, showError, userId]);
+
+  const postPresence = useCallback(
+    (isTyping: boolean) => {
+      if (!userId) return;
+      void fetch("/api/presence", {
+        method: "POST",
+        headers: JSON_HEADERS,
+        body: JSON.stringify({ isTyping, isTabVisible: tabVisibleRef.current }),
+      }).catch(() => undefined);
+    },
+    [userId],
+  );
 
   useEffect(() => {
     if (!userId) return;
     tabVisibleRef.current = document.visibilityState === "visible";
-    const heartbeat = () => {
-      fetch("/api/presence", { method: "POST", headers: authHeaders(), body: JSON.stringify({ isTyping: false, isTabVisible: tabVisibleRef.current }) }).catch(() => {});
-    };
-    const onVisChange = () => {
+    const heartbeat = () => postPresence(typingActiveRef.current);
+    const onVisibilityChange = () => {
       tabVisibleRef.current = document.visibilityState === "visible";
       heartbeat();
     };
-    document.addEventListener("visibilitychange", onVisChange);
+    document.addEventListener("visibilitychange", onVisibilityChange);
     heartbeat();
-    heartbeatRef.current = setInterval(heartbeat, 3000);
+    heartbeatRef.current = setInterval(heartbeat, 3_000);
     return () => {
-      document.removeEventListener("visibilitychange", onVisChange);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
       if (heartbeatRef.current) clearInterval(heartbeatRef.current);
+      heartbeatRef.current = null;
     };
-  }, [userId]);
+  }, [postPresence, userId]);
 
-  const sendTyping = useCallback((isTyping: boolean) => {
-    if (!userId) return;
-    fetch("/api/presence", { method: "POST", headers: authHeaders(), body: JSON.stringify({ isTyping, isTabVisible: tabVisibleRef.current }) }).catch(() => {});
-  }, [userId]);
+  const handleInputChange = useCallback(
+    (value: string) => {
+      setNewMessage(value);
+      if (!typingActiveRef.current) {
+        typingActiveRef.current = true;
+        postPresence(true);
+      }
+      if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+      typingTimeoutRef.current = setTimeout(() => {
+        typingActiveRef.current = false;
+        postPresence(false);
+      }, TYPING_IDLE_MS);
+    },
+    [postPresence],
+  );
 
-  const handleInputChange = (value: string) => {
-    setNewMessage(value); sendTyping(true);
-    if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
-    typingTimeoutRef.current = setTimeout(() => sendTyping(false), 2000);
-  };
-
-  // Always scroll to bottom when messages change (except loadMore)
   useEffect(() => {
     if (isLoadingMoreRef.current) return;
-    const scroll = () => messagesEndRef.current?.scrollIntoView({ behavior: "instant" });
+    const scroll = () =>
+      messagesEndRef.current?.scrollIntoView({ behavior: "instant" });
     scroll();
-    requestAnimationFrame(scroll);
-    const t = setTimeout(scroll, 150);
-    return () => clearTimeout(t);
+    const frame = requestAnimationFrame(scroll);
+    return () => cancelAnimationFrame(frame);
   }, [messages]);
 
   useEffect(() => {
     if (!userId) return;
-    const vv = window.visualViewport; if (!vv) return;
-    const onResize = () => {
-      const offset = window.innerHeight - vv.height;
-      if (formRef.current) formRef.current.style.transform = offset > 0 ? `translateY(-${offset}px)` : "";
-      messagesEndRef.current?.scrollIntoView({ behavior: "instant" });
-    };
-    vv.addEventListener("resize", onResize); return () => vv.removeEventListener("resize", onResize);
-  }, [userId]);
-
-  useEffect(() => {
-    if (!userId) return;
-    const doDisconnect = () => {
+    const disconnect = () => {
       if (beaconSentRef.current) return;
       beaconSentRef.current = true;
-      if (sseRef.current) { sseRef.current.close(); sseRef.current = null; }
-      const payload = JSON.stringify({ token: tokenRef.current, userLabel });
-      const blob = new Blob([payload], { type: "application/json" });
-      const sent = navigator.sendBeacon("/api/disconnect", blob);
+      eventSourceRef.current?.close();
+      const sent = navigator.sendBeacon(
+        "/api/disconnect",
+        new Blob(["{}"], { type: "application/json" }),
+      );
       if (!sent) {
-        fetch("/api/disconnect", {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: payload, keepalive: true,
-        }).catch(() => {});
+        void fetch("/api/disconnect", {
+          method: "POST",
+          headers: JSON_HEADERS,
+          body: "{}",
+          keepalive: true,
+        }).catch(() => undefined);
       }
     };
-    window.addEventListener("pagehide", doDisconnect);
-    window.addEventListener("beforeunload", doDisconnect);
+    window.addEventListener("pagehide", disconnect);
     return () => {
-      window.removeEventListener("pagehide", doDisconnect);
-      window.removeEventListener("beforeunload", doDisconnect);
+      window.removeEventListener("pagehide", disconnect);
       beaconSentRef.current = false;
     };
-  }, [userId, userLabel]);
+  }, [userId]);
 
-  const loadMore = async () => {
+  const loadMore = useCallback(async () => {
     if (!userId || loadingMore || messages.length === 0) return;
+    const oldestServerMessage = messages.find((message) => message.id > 0);
+    if (!oldestServerMessage) return;
+
     setLoadingMore(true);
     isLoadingMoreRef.current = true;
-    const viewport = messagesEndRef.current?.closest("[data-slot='scroll-area-viewport']");
-    const prevScrollHeight = viewport?.scrollHeight ?? 0;
+    const viewport = messagesEndRef.current?.closest<HTMLElement>(
+      "[data-slot='scroll-area-viewport']",
+    );
+    const previousScrollHeight = viewport?.scrollHeight ?? 0;
     try {
-      const oldestId = messages[0].id;
-      const res = await fetch(`/api/messages?before=${oldestId}`, { headers: { Authorization: `Bearer ${tokenRef.current}` } });
-      const data = await res.json();
-      if (data.messages?.length > 0) {
-        const older: Message[] = data.messages.map((msg: Message) => {
-          if (msg.media) mediaCacheRef.current.set(msg.id, msg.media);
-          return msg;
-        });
-        setMessages((prev) => [...older, ...prev]);
-        for (const m of older) prevMsgIdsRef.current.add(m.id);
-        setHasMore(!!data.hasMore);
-        requestAnimationFrame(() => {
-          if (viewport) viewport.scrollTop = viewport.scrollHeight - prevScrollHeight;
-          isLoadingMoreRef.current = false;
-        });
-      } else {
-        setHasMore(false);
-        isLoadingMoreRef.current = false;
+      const response = await fetch(
+        `/api/messages?before=${oldestServerMessage.id}`,
+      );
+      if (!response.ok) throw new Error("Chargement refusé");
+      const data = (await response.json()) as {
+        messages?: Message[];
+        hasMore?: boolean;
+      };
+      const older = Array.isArray(data.messages) ? data.messages : [];
+      for (const message of older) {
+        previousMessageIdsRef.current.add(message.id);
+        if (message.has_media) fetchMedia(message.id);
       }
+      setMessages((current) => {
+        const currentIds = new Set(current.map((message) => message.id));
+        return [
+          ...older.filter((message) => !currentIds.has(message.id)),
+          ...current,
+        ];
+      });
+      setHasMore(Boolean(data.hasMore));
+      requestAnimationFrame(() => {
+        if (viewport)
+          viewport.scrollTop = viewport.scrollHeight - previousScrollHeight;
+        isLoadingMoreRef.current = false;
+      });
     } catch {
       showError("Erreur lors du chargement");
       isLoadingMoreRef.current = false;
+    } finally {
+      setLoadingMore(false);
     }
-    setLoadingMore(false);
-  };
+  }, [fetchMedia, loadingMore, messages, showError, userId]);
 
-  const handleLogin = async (e: React.FormEvent) => {
-    e.preventDefault(); setLoading(true); setError("");
+  const handleLogin = useCallback(async () => {
+    if (loading) return;
+    setLoading(true);
+    setError("");
     try {
-      const res = await fetch("/api/auth", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ password }) });
-      const data = await res.json();
-      if (res.ok) { tokenRef.current = data.token; setUserId(data.userId); setUserLabel(data.label); } else setError(data.error || "Mot de passe incorrect");
-    } catch { setError("Erreur de connexion"); }
-    setLoading(false);
-  };
+      const response = await fetch("/api/auth", {
+        method: "POST",
+        headers: JSON_HEADERS,
+        body: JSON.stringify({ password }),
+      });
+      const data = (await response.json()) as {
+        error?: string;
+        userId?: number;
+        label?: string;
+      };
+      if (!response.ok || !data.userId || typeof data.label !== "string") {
+        setError(data.error || "Mot de passe incorrect");
+        return;
+      }
+      beaconSentRef.current = false;
+      setUserId(data.userId);
+      setUserLabel(data.label);
+      setPassword("");
+    } catch {
+      setError("Erreur de connexion");
+    } finally {
+      setLoading(false);
+    }
+  }, [loading, password]);
 
-  const handleSend = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (editingMsg) {
-      if (!newMessage.trim()) return;
-      setSending(true);
+  const saveEdit = useCallback(
+    async (message: Message) => {
+      const content = newMessage.trim();
+      if (!content || savingEdit) return;
+      const previousContent = message.content;
+      setSavingEdit(true);
+      setMessages((current) =>
+        current.map((item) =>
+          item.id === message.id ? { ...item, content, edited: true } : item,
+        ),
+      );
+      setEditingMsg(null);
+      setNewMessage("");
       try {
-        const res = await fetch("/api/messages", {
-          method: "PATCH", headers: authHeaders(),
-          body: JSON.stringify({ messageId: editingMsg.id, content: newMessage.trim() }),
+        const response = await fetch("/api/messages", {
+          method: "PATCH",
+          headers: JSON_HEADERS,
+          body: JSON.stringify({ messageId: message.id, content }),
         });
-        if (!res.ok) throw new Error();
-        setEditingMsg(null);
-        setNewMessage("");
-      } catch { showError("Erreur lors de la modification"); }
-      setSending(false);
+        if (!response.ok) throw new Error("Modification refusée");
+      } catch {
+        setMessages((current) =>
+          current.map((item) =>
+            item.id === message.id
+              ? { ...item, content: previousContent }
+              : item,
+          ),
+        );
+        setEditingMsg(message);
+        setNewMessage(content);
+        showError("Erreur lors de la modification");
+      } finally {
+        setSavingEdit(false);
+      }
+    },
+    [newMessage, savingEdit, showError],
+  );
+
+  const sendMessage = useCallback(async () => {
+    if (!userId) return;
+    if (editingMsg) {
+      await saveEdit(editingMsg);
       return;
     }
-    if ((!newMessage.trim() && !mediaPreview) || sending) return;
-    setSending(true);
-    sendTyping(false);
-    justSentRef.current = true;
+
+    const content = newMessage.trim();
+    if (!content && !mediaPreview) return;
+    const media = mediaPreview;
+    const currentMediaType = mediaType;
+    const currentReply = replyTo;
+    const optimisticId = optimisticIdRef.current--;
+    const optimisticMessage: Message = {
+      id: optimisticId,
+      sender_id: userId,
+      content: content || null,
+      media,
+      has_media: Boolean(media),
+      media_type: currentMediaType,
+      is_read: false,
+      created_at: new Date().toISOString(),
+      reply_to: currentReply?.id ?? null,
+      edited: false,
+      pending: true,
+      localOnly: true,
+    };
+
+    setMessages((current) => [...current, optimisticMessage]);
+    setNewMessage("");
+    setMediaPreview(null);
+    setMediaType(null);
+    setReplyTo(null);
+    typingActiveRef.current = false;
+    postPresence(false);
+
     try {
-      const res = await fetch("/api/messages", {
-        method: "POST", headers: authHeaders(),
+      const response = await fetch("/api/messages", {
+        method: "POST",
+        headers: JSON_HEADERS,
         body: JSON.stringify({
-          content: newMessage.trim() || null,
-          media: mediaPreview, mediaType, replyTo: replyTo?.id || null,
+          content: content || null,
+          media,
+          mediaType: currentMediaType,
+          replyTo: currentReply?.id ?? null,
         }),
       });
-      if (!res.ok) throw new Error();
-      const data = await res.json();
-      if (mediaPreview && data.message?.id) mediaCacheRef.current.set(data.message.id, mediaPreview);
-      setNewMessage(""); setMediaPreview(null); setMediaType(null); setReplyTo(null);
-      if (inputRef.current) inputRef.current.style.height = "";
-    } catch { showError("Erreur lors de l'envoi"); }
-    setSending(false);
-  };
+      const data = (await response.json()) as {
+        error?: string;
+        message?: Message;
+      };
+      if (!response.ok || !data.message)
+        throw new Error(data.error || "Envoi refusé");
 
-  const handleDelete = async (messageId: number) => {
-    try {
-      const res = await fetch("/api/messages", {
-        method: "DELETE", headers: authHeaders(),
-        body: JSON.stringify({ messageId }),
+      const confirmedMessage = data.message;
+      if (media) mediaCacheRef.current.set(confirmedMessage.id, media);
+      previousMessageIdsRef.current.add(confirmedMessage.id);
+      setMessages((current) => {
+        const withoutOptimistic = current.filter(
+          (message) => message.id !== optimisticId,
+        );
+        if (
+          withoutOptimistic.some(
+            (message) => message.id === confirmedMessage.id,
+          )
+        )
+          return withoutOptimistic;
+        return [
+          ...withoutOptimistic,
+          { ...confirmedMessage, media, pending: false, localOnly: true },
+        ];
       });
-      if (!res.ok) throw new Error();
-      mediaCacheRef.current.delete(messageId);
-    } catch { showError("Erreur lors de la suppression"); }
-  };
+    } catch (sendError) {
+      setMessages((current) =>
+        current.filter((message) => message.id !== optimisticId),
+      );
+      setNewMessage((current) => current || content);
+      if (media) {
+        setMediaPreview((current) => current || media);
+        setMediaType((current) => current || currentMediaType);
+      }
+      showError(
+        sendError instanceof Error
+          ? sendError.message
+          : "Erreur lors de l'envoi",
+      );
+    }
+  }, [
+    editingMsg,
+    mediaPreview,
+    mediaType,
+    newMessage,
+    postPresence,
+    replyTo,
+    saveEdit,
+    showError,
+    userId,
+  ]);
 
-  const startEdit = (msg: Message) => {
-    if (msg.sender_id !== userId || !msg.content) return;
-    setEditingMsg(msg); setNewMessage(msg.content);
-    setReplyTo(null); setMediaPreview(null); setMediaType(null); setSelectedMsg(null);
+  const handleDelete = useCallback(
+    async (messageId: number) => {
+      const removed = messages.find((message) => message.id === messageId);
+      setMessages((current) =>
+        current.filter((message) => message.id !== messageId),
+      );
+      try {
+        const response = await fetch("/api/messages", {
+          method: "DELETE",
+          headers: JSON_HEADERS,
+          body: JSON.stringify({ messageId }),
+        });
+        if (!response.ok) throw new Error("Suppression refusée");
+        mediaCacheRef.current.delete(messageId);
+      } catch {
+        if (removed)
+          setMessages((current) =>
+            [...current, removed].sort((a, b) => a.id - b.id),
+          );
+        showError("Erreur lors de la suppression");
+      }
+    },
+    [messages, showError],
+  );
+
+  const startEdit = useCallback(
+    (message: Message) => {
+      if (message.sender_id !== userId || !message.content || message.pending)
+        return;
+      setEditingMsg(message);
+      setNewMessage(message.content);
+      setReplyTo(null);
+      setMediaPreview(null);
+      setMediaType(null);
+      inputRef.current?.focus();
+    },
+    [userId],
+  );
+
+  const startReply = useCallback((message: Message) => {
+    if (message.pending) return;
+    setReplyTo(message);
+    setEditingMsg(null);
     inputRef.current?.focus();
-  };
+  }, []);
 
-  const startReply = (msg: Message) => {
-    setReplyTo(msg); setEditingMsg(null); setSelectedMsg(null);
-    inputRef.current?.focus();
-  };
+  const cancelAction = useCallback(() => {
+    setReplyTo(null);
+    setEditingMsg(null);
+    setNewMessage("");
+  }, []);
 
-  const cancelAction = () => { setReplyTo(null); setEditingMsg(null); setNewMessage(""); };
+  const handleFileSelect = useCallback(
+    (event: React.ChangeEvent<HTMLInputElement>) => {
+      const file = event.target.files?.[0];
+      event.target.value = "";
+      if (!file) return;
+      const validation = validateSelectedFile(file);
+      if (!validation.ok) {
+        showError(validation.error);
+        return;
+      }
 
-  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]; if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => { setMediaPreview(reader.result as string); if (file.type.startsWith("image/")) setMediaType("image"); else if (file.type.startsWith("video/")) setMediaType("video"); };
-    reader.readAsDataURL(file);
-    if (fileInputRef.current) fileInputRef.current.value = "";
-    if (cameraInputRef.current) cameraInputRef.current.value = "";
-  };
+      const reader = new FileReader();
+      reader.onload = () => {
+        if (typeof reader.result !== "string") return;
+        setMediaPreview(reader.result);
+        setMediaType(file.type.startsWith("image/") ? "image" : "video");
+      };
+      reader.onerror = () => showError("Impossible de lire ce fichier");
+      reader.readAsDataURL(file);
+    },
+    [showError],
+  );
 
-  const handleDisconnect = async () => {
-    if (sseRef.current) { sseRef.current.close(); sseRef.current = null; }
+  const resetSession = useCallback(() => {
+    mediaCacheRef.current.clear();
+    mediaFetchingRef.current.clear();
+    previousMessageIdsRef.current.clear();
+    setUserId(null);
+    setUserLabel("");
+    setMessages([]);
+    setPassword("");
+    setReplyTo(null);
+    setEditingMsg(null);
+    setMediaPreview(null);
+    setMediaType(null);
+  }, []);
+
+  const handleDisconnect = useCallback(async () => {
+    eventSourceRef.current?.close();
     if (heartbeatRef.current) clearInterval(heartbeatRef.current);
     try {
       await fetch("/api/disconnect", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ token: tokenRef.current, userLabel }),
+        method: "POST",
+        headers: JSON_HEADERS,
+        body: "{}",
       });
-    } catch {}
-    mediaCacheRef.current.clear(); prevMsgIdsRef.current.clear(); tokenRef.current = "";
-    setUserId(null); setUserLabel(""); setMessages([]); setPassword("");
-    setReplyTo(null); setEditingMsg(null);
-  };
+    } catch {
+      showError("La déconnexion distante a échoué");
+    } finally {
+      resetSession();
+    }
+  }, [resetSession, showError]);
 
-  const handleClearAll = async () => {
+  const handleClearAll = useCallback(async () => {
     if (!userId) return;
     try {
-      const res = await fetch("/api/messages/clear", {
-        method: "POST", headers: authHeaders(),
+      const response = await fetch("/api/messages/clear", {
+        method: "POST",
+        headers: JSON_HEADERS,
+        body: "{}",
       });
-      if (!res.ok) throw new Error();
-      mediaCacheRef.current.clear(); prevMsgIdsRef.current.clear();
-    } catch { showError("Erreur lors de la suppression"); }
-  };
+      if (!response.ok) throw new Error("Nettoyage refusé");
+      mediaCacheRef.current.clear();
+      previousMessageIdsRef.current.clear();
+      setMessages([]);
+      setHasMore(false);
+    } catch {
+      showError("Erreur lors de la suppression");
+    }
+  }, [showError, userId]);
 
-  const handleWipeDB = async () => {
+  const handleWipeDB = useCallback(async () => {
     if (userId !== 1) return;
     try {
-      const res = await fetch("/api/wipe", { method: "POST", headers: authHeaders() });
-      if (!res.ok) throw new Error();
-      mediaCacheRef.current.clear(); prevMsgIdsRef.current.clear();
-    } catch { showError("Erreur lors du nettoyage"); }
-  };
+      const response = await fetch("/api/wipe", {
+        method: "POST",
+        headers: JSON_HEADERS,
+        body: "{}",
+      });
+      if (!response.ok) throw new Error("Nettoyage refusé");
+      mediaCacheRef.current.clear();
+      previousMessageIdsRef.current.clear();
+      setMessages([]);
+      setHasMore(false);
+    } catch {
+      showError("Erreur lors du nettoyage");
+    }
+  }, [showError, userId]);
 
   const handleScreenshotDetected = useCallback(async () => {
     if (!userId || canBypass) return;
     const now = Date.now();
-    if (now - lastScreenshotAlert.current < 10000) return;
-    lastScreenshotAlert.current = now;
+    if (now - lastScreenshotAlertRef.current < SCREENSHOT_NOTICE_COOLDOWN_MS)
+      return;
+    lastScreenshotAlertRef.current = now;
     try {
       await fetch("/api/messages", {
-        method: "POST", headers: authHeaders(),
+        method: "POST",
+        headers: JSON_HEADERS,
         body: JSON.stringify({
-          content: `${userLabel} a peut-être fait une capture d'écran`, mediaType: "system",
+          content: "capture détectée",
+          mediaType: "system",
         }),
       });
-    } catch {}
-  }, [userId, userLabel, canBypass]);
+    } catch {
+      showError("Impossible de signaler la capture");
+    }
+  }, [canBypass, showError, userId]);
 
   useEffect(() => {
     if (!userId || canBypass) return;
-    const handleKeyUp = (e: KeyboardEvent) => { if (e.key === "PrintScreen") handleScreenshotDetected(); };
-    const handleKeyDown = (e: KeyboardEvent) => {
-      const isMac = e.metaKey && e.shiftKey && ["3", "4", "5"].includes(e.key);
-      const isWin = e.key === "PrintScreen" || (e.metaKey && e.shiftKey && e.key.toLowerCase() === "s");
-      const isCtrlS = e.ctrlKey && e.shiftKey && e.key.toLowerCase() === "s";
-      if (isMac || isWin || isCtrlS) handleScreenshotDetected();
-      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === "s") {
-        e.preventDefault(); handleScreenshotDetected();
+    const onKeyDown = (event: KeyboardEvent) => {
+      const key = event.key.toLowerCase();
+      const isMacCapture =
+        event.metaKey && event.shiftKey && ["3", "4", "5"].includes(key);
+      const isWindowsCapture =
+        event.key === "PrintScreen" ||
+        (event.metaKey && event.shiftKey && key === "s");
+      if (isMacCapture || isWindowsCapture) void handleScreenshotDetected();
+    };
+    const onContextMenu = (event: MouseEvent) => {
+      const target = event.target as HTMLElement;
+      if (target.tagName === "IMG" || target.tagName === "VIDEO") {
+        event.preventDefault();
+        void handleScreenshotDetected();
       }
-      if (e.key === "F12" || (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === "i")) e.preventDefault();
     };
-    const handleCtx = (e: MouseEvent) => {
-      const t = e.target as HTMLElement;
-      if (t.tagName === "IMG" || t.tagName === "VIDEO") { e.preventDefault(); handleScreenshotDetected(); }
-    };
-    window.addEventListener("keyup", handleKeyUp);
-    window.addEventListener("keydown", handleKeyDown);
-    document.addEventListener("contextmenu", handleCtx);
+    window.addEventListener("keydown", onKeyDown);
+    document.addEventListener("contextmenu", onContextMenu);
     return () => {
-      window.removeEventListener("keyup", handleKeyUp);
-      window.removeEventListener("keydown", handleKeyDown);
-      document.removeEventListener("contextmenu", handleCtx);
+      window.removeEventListener("keydown", onKeyDown);
+      document.removeEventListener("contextmenu", onContextMenu);
     };
-  }, [userId, canBypass, handleScreenshotDetected]);
+  }, [canBypass, handleScreenshotDetected, userId]);
 
-  const getMessageById = (id: number) => messages.find((m) => m.id === id);
+  const messageById = useMemo(
+    () => new Map(messages.map((message) => [message.id, message])),
+    [messages],
+  );
+
+  const bindMessagesEnd = useCallback((element: HTMLDivElement | null) => {
+    messagesEndRef.current = element;
+  }, []);
+  const bindFileInput = useCallback((element: HTMLInputElement | null) => {
+    fileInputRef.current = element;
+  }, []);
+  const bindCameraInput = useCallback((element: HTMLInputElement | null) => {
+    cameraInputRef.current = element;
+  }, []);
+  const bindComposer = useCallback((element: HTMLTextAreaElement | null) => {
+    inputRef.current = element;
+  }, []);
+  const openFilePicker = useCallback(() => fileInputRef.current?.click(), []);
+  const openCamera = useCallback(() => cameraInputRef.current?.click(), []);
 
   return {
-    userId, userLabel, password, setPassword, messages, newMessage, loading, error,
-    initialized, mediaPreview, mediaType, sending, selectedMsg, setSelectedMsg,
-    lightboxSrc, setLightboxSrc, otherOnline, otherTyping, otherLabel, newMsgIds,
-    replyTo, editingMsg, hasMore, loadingMore, theme,
-    scrollRef, messagesEndRef, fileInputRef, cameraInputRef, inputRef, formRef,
-    toggleTheme, handleInputChange, loadMore, handleLogin, handleSend, handleDelete,
-    startEdit, startReply, cancelAction, handleFileSelect, handleDisconnect,
-    handleClearAll, handleWipeDB, handleScreenshotDetected, getMessageById,
-    setMediaPreview, setMediaType, canBypass,
+    state: {
+      userId,
+      userLabel,
+      password,
+      messages,
+      messageById,
+      newMessage,
+      loading,
+      error,
+      mediaPreview,
+      mediaType,
+      lightboxSrc,
+      otherOnline,
+      otherTyping,
+      otherLabel,
+      newMsgIds,
+      replyTo,
+      editingMsg,
+      hasMore,
+      loadingMore,
+      savingEdit,
+      theme,
+      canBypass,
+    },
+    actions: {
+      setPassword,
+      setLightboxSrc,
+      setMediaPreview,
+      setMediaType,
+      toggleTheme,
+      handleInputChange,
+      loadMore,
+      handleLogin,
+      sendMessage,
+      handleDelete,
+      startEdit,
+      startReply,
+      cancelAction,
+      handleFileSelect,
+      handleDisconnect,
+      handleClearAll,
+      handleWipeDB,
+      handleScreenshotDetected,
+      openFilePicker,
+      openCamera,
+    },
+    bindings: {
+      bindMessagesEnd,
+      bindFileInput,
+      bindCameraInput,
+      bindComposer,
+    },
   };
 }
+
+export type ChatController = ReturnType<typeof useChat>;

@@ -1,166 +1,246 @@
 import { NextRequest, NextResponse } from "next/server";
 import sql from "@/lib/db";
-import { encryptOrNull, decryptOrNull, verifyToken } from "@/lib/crypto";
+import { decryptOrNull, encryptOrNull } from "@/lib/crypto";
+import {
+  MAX_CONTENT_LENGTH,
+  validateMessagePayload,
+} from "@/lib/message-validation";
+import { getAuthenticatedUserId, isTrustedMutation } from "@/lib/session";
 
 export const maxDuration = 60;
 
 const PAGE_SIZE = 50;
-const ALLOWED_MEDIA_TYPES = ["image", "video", "system"];
-const MAX_CONTENT_LENGTH = 5000;
+const PAGE_FETCH_SIZE = PAGE_SIZE + 1;
 
-
-function authFromHeader(req: NextRequest): number | null {
-  const h = req.headers.get("authorization");
-  if (!h?.startsWith("Bearer ")) return null;
-  return verifyToken(h.slice(7));
-}
-
-function isValidBase64Media(media: string): boolean {
-  return /^data:(image|video)\/[a-zA-Z0-9.+-]+;base64,/.test(media);
-}
-
-export async function GET(req: NextRequest) {
+export async function GET(request: NextRequest) {
   try {
-    const uid = authFromHeader(req);
-    if (!uid) return NextResponse.json({ error: "Non autorisé" }, { status: 401 });
-    const before = req.nextUrl.searchParams.get("before");
+    const userId = getAuthenticatedUserId(request);
+    if (!userId) return unauthorized();
 
-    let messages;
-    if (before && !isNaN(Number(before))) {
-      messages = await sql`
-        SELECT id, sender_id, content, media, media_type, is_read, created_at, reply_to, edited
-        FROM messages
-        WHERE id < ${Number(before)} AND (hidden = FALSE OR hidden IS NULL)
-        ORDER BY created_at DESC
-        LIMIT ${PAGE_SIZE}
-      `;
-      messages.reverse();
-    } else {
-      messages = await sql`
-        SELECT id, sender_id, content, media, media_type, is_read, created_at, reply_to, edited
-        FROM messages
-        WHERE hidden = FALSE OR hidden IS NULL
-        ORDER BY created_at DESC
-        LIMIT ${PAGE_SIZE}
-      `;
-      messages.reverse();
-    }
+    const before = parsePositiveInteger(
+      request.nextUrl.searchParams.get("before"),
+    );
+    const rows = before
+      ? await sql`
+          SELECT id, sender_id, content, (media IS NOT NULL) AS has_media,
+            media_type, is_read, created_at, reply_to, edited
+          FROM messages m
+          WHERE m.id < ${before}
+            AND (m.hidden = FALSE OR m.hidden IS NULL)
+            AND (m.expires_at IS NULL OR m.expires_at > NOW())
+            AND NOT EXISTS (
+              SELECT 1 FROM message_hidden_for h
+              WHERE h.message_id = m.id AND h.user_id = ${userId}
+            )
+          ORDER BY m.id DESC
+          LIMIT ${PAGE_FETCH_SIZE}
+        `
+      : await sql`
+          SELECT id, sender_id, content, (media IS NOT NULL) AS has_media,
+            media_type, is_read, created_at, reply_to, edited
+          FROM messages m
+          WHERE (m.hidden = FALSE OR m.hidden IS NULL)
+            AND (m.expires_at IS NULL OR m.expires_at > NOW())
+            AND NOT EXISTS (
+              SELECT 1 FROM message_hidden_for h
+              WHERE h.message_id = m.id AND h.user_id = ${userId}
+            )
+          ORDER BY m.id DESC
+          LIMIT ${PAGE_FETCH_SIZE}
+        `;
 
-    const hasMore = messages.length === PAGE_SIZE && messages.length > 0
-      ? (await sql`SELECT COUNT(*) as count FROM messages WHERE id < ${messages[0].id} AND (hidden = FALSE OR hidden IS NULL)`)[0].count > 0
-      : false;
-
-    const optimized = messages.map((msg) => ({
-      ...msg,
-      content: decryptOrNull(msg.content),
-      media: decryptOrNull(msg.media),
-    }));
-
-    return NextResponse.json({ messages: optimized, hasMore });
+    const hasMore = rows.length > PAGE_SIZE;
+    const messages = rows
+      .slice(0, PAGE_SIZE)
+      .reverse()
+      .map((message) => ({
+        ...message,
+        content: decryptOrNull(message.content),
+        media: null,
+      }));
+    return NextResponse.json({ messages, hasMore });
   } catch (error) {
-    return NextResponse.json({ error: "Failed" }, { status: 500 });
+    console.error("Échec du chargement des messages", error);
+    return NextResponse.json(
+      { error: "Impossible de charger les messages" },
+      { status: 500 },
+    );
   }
 }
 
-export async function POST(req: NextRequest) {
+export async function POST(request: NextRequest) {
+  if (!isTrustedMutation(request)) return forbiddenOrigin();
+
   try {
-    const userId = authFromHeader(req);
-    if (!userId) return NextResponse.json({ error: "Non autorisé" }, { status: 401 });
-    const body = await req.json();
-    const { content, media, mediaType, replyTo } = body;
+    const userId = getAuthenticatedUserId(request);
+    if (!userId) return unauthorized();
 
-    if (!content && !media) {
-      return NextResponse.json({ error: "Empty message" }, { status: 400 });
+    const validation = validateMessagePayload(await request.json());
+    if (!validation.ok) {
+      return NextResponse.json(
+        { error: validation.error },
+        { status: validation.status },
+      );
     }
 
-    if (content && (typeof content !== "string" || content.length > MAX_CONTENT_LENGTH)) {
-      return NextResponse.json({ error: "Message trop long" }, { status: 400 });
+    const payload = validation.value;
+    if (payload.replyTo && !(await messageExists(payload.replyTo, userId))) {
+      return NextResponse.json(
+        { error: "Message cité introuvable" },
+        { status: 400 },
+      );
     }
 
-    if (mediaType && !ALLOWED_MEDIA_TYPES.includes(mediaType)) {
-      return NextResponse.json({ error: "Type de média invalide" }, { status: 400 });
-    }
-
-    if (media) {
-      if (typeof media !== "string" || !isValidBase64Media(media)) {
-        return NextResponse.json({ error: "Format média invalide" }, { status: 400 });
-      }
-    }
-
-    if (replyTo !== null && replyTo !== undefined) {
-      if (typeof replyTo !== "number") {
-        return NextResponse.json({ error: "Invalid replyTo" }, { status: 400 });
-      }
-    }
-
-    const encContent = encryptOrNull(content || null);
-    const rawMedia = media || null;
-
-    const message = await sql`
+    const content =
+      payload.mediaType === "system"
+        ? await screenshotNoticeFor(userId)
+        : payload.content;
+    const encryptedContent = encryptOrNull(content);
+    const encryptedMedia = encryptOrNull(payload.media);
+    const rows = await sql`
       INSERT INTO messages (sender_id, content, media, media_type, reply_to)
-      VALUES (${userId}, ${encContent}, ${rawMedia}, ${mediaType || null}, ${replyTo || null})
+      VALUES (${userId}, ${encryptedContent}, ${encryptedMedia}, ${payload.mediaType}, ${payload.replyTo})
       RETURNING id, sender_id, content, media, media_type, is_read, created_at, reply_to, edited
     `;
 
-    const msg = message[0];
-    msg.content = content || null;
-    msg.media = media || null;
-    return NextResponse.json({ message: msg });
+    const message = {
+      ...rows[0],
+      content,
+      media: payload.media,
+    };
+    return NextResponse.json({ message }, { status: 201 });
   } catch (error) {
-    return NextResponse.json({ error: "Failed" }, { status: 500 });
+    console.error("Échec de l'envoi du message", error);
+    return NextResponse.json(
+      { error: "Impossible d'envoyer le message" },
+      { status: 500 },
+    );
   }
 }
 
-export async function PATCH(req: NextRequest) {
+export async function PATCH(request: NextRequest) {
+  if (!isTrustedMutation(request)) return forbiddenOrigin();
+
   try {
-    const userId = authFromHeader(req);
-    if (!userId) return NextResponse.json({ error: "Non autorisé" }, { status: 401 });
-    const { messageId, content } = await req.json();
-    if (!messageId || !content?.trim()) {
-      return NextResponse.json({ error: "Invalid" }, { status: 400 });
-    }
+    const userId = getAuthenticatedUserId(request);
+    if (!userId) return unauthorized();
+    const body: unknown = await request.json();
+    if (!body || typeof body !== "object") return invalidRequest();
 
-    if (typeof content !== "string" || content.length > MAX_CONTENT_LENGTH) {
-      return NextResponse.json({ error: "Message trop long" }, { status: 400 });
+    const { messageId, content } = body as {
+      messageId?: unknown;
+      content?: unknown;
+    };
+    if (
+      !Number.isSafeInteger(messageId) ||
+      Number(messageId) <= 0 ||
+      typeof content !== "string"
+    ) {
+      return invalidRequest();
     }
+    const normalized = content.trim();
+    if (!normalized || normalized.length > MAX_CONTENT_LENGTH)
+      return invalidRequest();
 
-    const msg = await sql`SELECT sender_id FROM messages WHERE id = ${messageId}`;
-    if (msg.length === 0) {
-      return NextResponse.json({ error: "Message introuvable" }, { status: 404 });
-    }
-    if (msg[0].sender_id !== userId) {
-      return NextResponse.json({ error: "Non autorisé" }, { status: 403 });
-    }
-
-    const encContent = encryptOrNull(content.trim());
-
-    await sql`
-      UPDATE messages SET content = ${encContent}, edited = TRUE
-      WHERE id = ${messageId} AND sender_id = ${userId}
+    const rows = await sql`
+      UPDATE messages
+      SET content = ${encryptOrNull(normalized)}, edited = TRUE, updated_at = NOW()
+      WHERE id = ${messageId as number} AND sender_id = ${userId}
+      RETURNING id
     `;
+    if (rows.length === 0) {
+      return NextResponse.json(
+        { error: "Message introuvable" },
+        { status: 404 },
+      );
+    }
     return NextResponse.json({ ok: true });
   } catch (error) {
-    return NextResponse.json({ error: "Failed" }, { status: 500 });
+    console.error("Échec de la modification du message", error);
+    return NextResponse.json(
+      { error: "Impossible de modifier le message" },
+      { status: 500 },
+    );
   }
 }
 
-export async function DELETE(req: NextRequest) {
+export async function DELETE(request: NextRequest) {
+  if (!isTrustedMutation(request)) return forbiddenOrigin();
+
   try {
-    const userId = authFromHeader(req);
-    if (!userId) return NextResponse.json({ error: "Non autorisé" }, { status: 401 });
-    const { messageId } = await req.json();
-    if (!messageId || typeof messageId !== "number") {
-      return NextResponse.json({ error: "Invalid" }, { status: 400 });
-    }
+    const userId = getAuthenticatedUserId(request);
+    if (!userId) return unauthorized();
+    const body: unknown = await request.json();
+    const messageId =
+      body && typeof body === "object" && "messageId" in body
+        ? (body as { messageId?: unknown }).messageId
+        : null;
+    if (!Number.isSafeInteger(messageId) || Number(messageId) <= 0)
+      return invalidRequest();
 
-    if (userId === 1) {
-      await sql`DELETE FROM messages WHERE id = ${messageId}`;
-    } else {
-      await sql`UPDATE messages SET hidden = TRUE WHERE id = ${messageId}`;
+    const rows =
+      userId === 1
+        ? await sql`DELETE FROM messages WHERE id = ${messageId as number} RETURNING id`
+        : await sql`
+          INSERT INTO message_hidden_for (message_id, user_id)
+          SELECT id, ${userId} FROM messages WHERE id = ${messageId as number}
+          ON CONFLICT (message_id, user_id) DO NOTHING
+          RETURNING message_id AS id
+        `;
+    if (rows.length === 0) {
+      return NextResponse.json(
+        { error: "Message introuvable" },
+        { status: 404 },
+      );
     }
-
     return NextResponse.json({ ok: true });
   } catch (error) {
-    return NextResponse.json({ error: "Failed" }, { status: 500 });
+    console.error("Échec de la suppression du message", error);
+    return NextResponse.json(
+      { error: "Impossible de supprimer le message" },
+      { status: 500 },
+    );
   }
+}
+
+async function messageExists(
+  messageId: number,
+  userId: number,
+): Promise<boolean> {
+  const rows = await sql`
+    SELECT 1 FROM messages m
+    WHERE m.id = ${messageId}
+      AND (m.hidden = FALSE OR m.hidden IS NULL)
+      AND (m.expires_at IS NULL OR m.expires_at > NOW())
+      AND NOT EXISTS (
+        SELECT 1 FROM message_hidden_for h
+        WHERE h.message_id = m.id AND h.user_id = ${userId}
+      )
+  `;
+  return rows.length > 0;
+}
+
+async function screenshotNoticeFor(userId: number): Promise<string> {
+  const rows = await sql`SELECT label FROM users WHERE id = ${userId}`;
+  const label =
+    typeof rows[0]?.label === "string" ? rows[0].label : "Un utilisateur";
+  return `${label} a peut-être fait une capture d'écran`;
+}
+
+function parsePositiveInteger(value: string | null): number | null {
+  if (!value || !/^\d+$/.test(value)) return null;
+  const number = Number(value);
+  return Number.isSafeInteger(number) && number > 0 ? number : null;
+}
+
+function unauthorized() {
+  return NextResponse.json({ error: "Non autorisé" }, { status: 401 });
+}
+
+function forbiddenOrigin() {
+  return NextResponse.json({ error: "Origine non autorisée" }, { status: 403 });
+}
+
+function invalidRequest() {
+  return NextResponse.json({ error: "Requête invalide" }, { status: 400 });
 }
