@@ -96,6 +96,21 @@ describe("POST /api/auth", () => {
     expect(mocks.checkLoginRateLimit).toHaveBeenCalledWith("203.0.113.4");
   });
 
+  it("préfère l'adresse normalisée par Vercel", async () => {
+    const { POST } = await import("./route");
+    await POST(
+      authRequest(
+        { password: "correct-password" },
+        {
+          "x-vercel-forwarded-for": "198.51.100.7",
+          "x-forwarded-for": "203.0.113.4",
+        },
+      ),
+    );
+
+    expect(mocks.checkLoginRateLimit).toHaveBeenCalledWith("198.51.100.7");
+  });
+
   it.each([
     [{}, 400],
     [{ password: 42 }, 400],

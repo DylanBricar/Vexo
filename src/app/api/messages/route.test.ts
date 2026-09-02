@@ -97,7 +97,7 @@ describe("/api/messages", () => {
     const { GET } = await import("./route");
     const response = await GET(
       new NextRequest("https://vexo.example/api/messages?before=100", {
-        headers: { authorization: "Bearer token" },
+        headers: { cookie: "vexo_session=test-token" },
       }),
     );
     const data = await response.json();
@@ -191,7 +191,7 @@ function requestFor(
   return new NextRequest("https://vexo.example/api/messages", {
     method,
     headers: {
-      authorization: "Bearer test-token",
+      cookie: "vexo_session=test-token",
       "content-type": "application/json",
       ...extraHeaders,
     },

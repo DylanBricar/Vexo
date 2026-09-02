@@ -21,7 +21,7 @@ La première tentative de connexion initialise ou migre le schéma. La limitatio
 
 ## Configuration
 
-Prérequis: Node.js 24 et npm 10 ou plus récent.
+Prérequis: Node.js 24 (24.20.0 recommandé) et npm 12.0.2.
 
 ```bash
 copy .env.example .env.local
@@ -54,3 +54,9 @@ Les tests Playwright couvrent le champ de connexion immédiatement disponible, l
 ## Déploiement
 
 La branche `main` est destinée à Vercel. Le projet déclare Node.js 24 dans `package.json`; les secrets doivent être configurés dans les variables d'environnement Vercel. Après un push, vérifier le statut du déploiement, son alias de production et le parcours de connexion dans le navigateur.
+
+Vexo est une application privée. Toutes les réponses émettent une politique
+`X-Robots-Tag` de désindexation, et `robots.txt` refuse les principaux robots
+d'entraînement explicitement identifiés. Il ne faut pas ajouter de sitemap,
+de données structurées ou de contenu destiné au référencement sans isoler une
+véritable vitrine publique du chat et de ses API.

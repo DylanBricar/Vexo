@@ -26,7 +26,9 @@ export function MessageList({ actions, bindings, state }: Props) {
     <ScrollArea className="chat-bg min-h-0 flex-1">
       <section
         aria-label="Messages"
+        role="log"
         aria-live="polite"
+        aria-relevant="additions text"
         className="mx-auto max-w-2xl space-y-3 px-3 py-3 sm:px-4"
       >
         {state.hasMore && (
@@ -62,6 +64,7 @@ export function MessageList({ actions, bindings, state }: Props) {
           <div
             className="flex justify-start"
             aria-label={`${state.otherLabel} écrit`}
+            role="status"
           >
             <div className="flex items-center gap-1.5 rounded-2xl bg-muted px-4 py-3">
               {[
@@ -183,6 +186,8 @@ function MessageRow({
               src={message.media}
               alt="Image envoyée"
               className="max-h-64 max-w-full rounded-lg object-contain"
+              loading="lazy"
+              decoding="async"
             />
           </button>
         )}
@@ -192,6 +197,7 @@ function MessageRow({
             controls
             className="mb-1 max-h-64 max-w-full rounded-lg"
             playsInline
+            preload="metadata"
             aria-label="Vidéo envoyée"
           />
         )}
@@ -227,14 +233,14 @@ function MessageRow({
           className={`mt-1 flex flex-wrap items-center gap-x-1 gap-y-0.5 ${isMine ? "justify-end" : ""}`}
         >
           {message.edited && (
-            <span className="text-[10px] italic opacity-60">modifié</span>
+            <span className="text-[11px] italic opacity-75">modifié</span>
           )}
           {message.pending && (
-            <span className="text-[10px] italic opacity-70">Envoi...</span>
+            <span className="text-[11px] italic opacity-80">Envoi...</span>
           )}
           <time
             dateTime={message.created_at}
-            className="text-[10px] opacity-65"
+            className="text-[11px] opacity-75"
           >
             {timestamp}
           </time>
@@ -270,7 +276,7 @@ function ActionButton({
     <button
       type="button"
       onClick={onClick}
-      className={`flex size-7 cursor-pointer items-center justify-center rounded-full text-white shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${destructive ? "bg-destructive hover:bg-destructive/85" : "bg-muted-foreground hover:bg-foreground"}`}
+      className={`flex size-8 cursor-pointer items-center justify-center rounded-full text-white shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${destructive ? "bg-destructive hover:bg-destructive/85" : "bg-muted-foreground hover:bg-foreground"}`}
       aria-label={label}
       title={label}
     >

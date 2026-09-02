@@ -13,14 +13,7 @@ const initialMessage = {
   edited: false,
 };
 
-test("le champ de connexion est utilisable sans attendre l'initialisation", async ({
-  page,
-}) => {
-  await page.route("**/api/init", async (route) => {
-    await new Promise((resolve) => setTimeout(resolve, 2_000));
-    await route.fulfill({ status: 200, json: { ok: true } });
-  });
-
+test("le champ de connexion est immédiatement utilisable", async ({ page }) => {
   await page.goto("/");
 
   await expect(page.getByPlaceholder("Mot de passe")).toBeEnabled({
@@ -71,9 +64,6 @@ for (const viewport of [
 test("l'ecran de connexion respecte les controles WCAG automatisables", async ({
   page,
 }) => {
-  await page.route("**/api/init", (route) =>
-    route.fulfill({ status: 200, json: { ok: true } }),
-  );
   await page.goto("/");
 
   const results = await new AxeBuilder({ page }).analyze();
@@ -105,9 +95,6 @@ async function login(page: Page) {
 }
 
 async function mockChat(page: Page, postDelayMs: number) {
-  await page.route("**/api/init", (route) =>
-    route.fulfill({ status: 200, json: { ok: true } }),
-  );
   await page.route("**/api/auth", (route) =>
     route.fulfill({
       status: 200,
@@ -146,3 +133,29 @@ async function mockChat(page: Page, postDelayMs: number) {
     });
   });
 }
+
+test("les pages et API privées refusent l'indexation", async ({ request }) => {
+  const pageResponse = await request.get("/");
+  const apiResponse = await request.get("/api/messages");
+  const robotsResponse = await request.get("/robots.txt");
+  const robotsBody = await robotsResponse.text();
+  const expectedPolicy =
+    "noindex, nofollow, noarchive, nosnippet, noimageindex";
+
+  expect(pageResponse.headers()["x-robots-tag"]).toBe(expectedPolicy);
+  expect(apiResponse.headers()["x-robots-tag"]).toBe(expectedPolicy);
+  expect(apiResponse.headers()["cache-control"]).toContain("no-store");
+  for (const crawler of [
+    "GPTBot",
+    "Google-Extended",
+    "ClaudeBot",
+    "CCBot",
+    "Applebot-Extended",
+    "Meta-ExternalAgent",
+  ]) {
+    const crawlerBlock = robotsBody
+      .split(/\r?\n\r?\n/)
+      .find((block) => block.includes(`User-Agent: ${crawler}`));
+    expect(crawlerBlock).toContain("Disallow: /");
+  }
+});

@@ -30,14 +30,14 @@ describe("session", () => {
     expect(cryptoMocks.verifyToken).toHaveBeenCalledWith("2:cookie");
   });
 
-  it("accepte un token Bearer de compatibilité et refuse une requête anonyme", () => {
+  it("refuse les tokens Bearer et les requêtes anonymes", () => {
     expect(
       getAuthenticatedUserId(
         new NextRequest("https://vexo.example", {
           headers: { authorization: "Bearer 1:header" },
         }),
       ),
-    ).toBe(1);
+    ).toBeNull();
     expect(
       getAuthenticatedUserId(new NextRequest("https://vexo.example")),
     ).toBeNull();

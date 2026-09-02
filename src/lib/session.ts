@@ -6,12 +6,7 @@ const SESSION_MAX_AGE_SECONDS = 24 * 60 * 60;
 
 export function getAuthenticatedUserId(request: NextRequest): number | null {
   const cookieToken = request.cookies.get(SESSION_COOKIE_NAME)?.value;
-  if (cookieToken) return verifyToken(cookieToken);
-
-  const authorization = request.headers.get("authorization");
-  if (authorization?.startsWith("Bearer "))
-    return verifyToken(authorization.slice(7));
-  return null;
+  return cookieToken ? verifyToken(cookieToken) : null;
 }
 
 export function setSessionCookie(response: NextResponse, userId: number): void {

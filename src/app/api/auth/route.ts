@@ -70,9 +70,18 @@ function getPassword(body: unknown): string | null {
 }
 
 function getClientAddress(request: NextRequest): string {
+  const vercelForwarded = request.headers
+    .get("x-vercel-forwarded-for")
+    ?.split(",")[0]
+    ?.trim();
   const forwarded = request.headers
     .get("x-forwarded-for")
     ?.split(",")[0]
     ?.trim();
-  return forwarded || request.headers.get("x-real-ip")?.trim() || "unknown";
+  return (
+    vercelForwarded ||
+    forwarded ||
+    request.headers.get("x-real-ip")?.trim() ||
+    "unknown"
+  );
 }
