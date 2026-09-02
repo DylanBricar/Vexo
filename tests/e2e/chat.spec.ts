@@ -8,7 +8,7 @@ const initialMessage = {
   media: null,
   media_type: null,
   is_read: false,
-  created_at: "2026-08-05T15:20:00",
+  created_at: "2026-08-05T13:20:00Z",
   reply_to: null,
   edited: false,
 };
@@ -127,7 +127,7 @@ async function mockChat(page: Page, postDelayMs: number) {
           id: 2,
           sender_id: 1,
           content: requestBody.content,
-          created_at: "2026-08-05T15:21:00",
+          created_at: "2026-08-05T13:21:00Z",
         },
       },
     });

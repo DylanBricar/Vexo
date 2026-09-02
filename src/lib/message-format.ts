@@ -18,7 +18,7 @@ export function splitMessageLinks(text: string): MessageContentPart[] {
 
 export function formatMessageTimestamp(
   value: string,
-  timeZone?: string,
+  timeZone = "Europe/Brussels",
 ): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "Date inconnue";

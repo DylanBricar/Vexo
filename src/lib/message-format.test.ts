@@ -3,9 +3,9 @@ import { formatMessageTimestamp, splitMessageLinks } from "./message-format";
 
 describe("formatMessageTimestamp", () => {
   it("affiche la date complete et l'heure du message", () => {
-    expect(
-      formatMessageTimestamp("2026-08-05T15:20:00", "Europe/Brussels"),
-    ).toBe("05/08/2026 à 15:20");
+    expect(formatMessageTimestamp("2026-08-05T13:20:00Z")).toBe(
+      "05/08/2026 à 15:20",
+    );
   });
 
   it("renvoie une valeur sure pour une date invalide", () => {
