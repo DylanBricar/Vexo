@@ -60,3 +60,8 @@ Vexo est une application privée. Toutes les réponses émettent une politique
 d'entraînement explicitement identifiés. Il ne faut pas ajouter de sitemap,
 de données structurées ou de contenu destiné au référencement sans isoler une
 véritable vitrine publique du chat et de ses API.
+
+## Licence
+
+Ce dépôt est privé et ne fournit aucune licence publique. Son utilisation et sa
+redistribution sont réservées au propriétaire du projet.
