@@ -1,5 +1,11 @@
 # Récapitulatif temporaire - Vexo
 
+## Actualisation des consignes et de la livraison - 27 octobre 2026
+
+Les consignes sont révisées pour travailler sur main, sans sauvegarde ou worktree automatique, avec contrôles proportionnés et secrets privés hors Git/logs. Les anciennes mentions d'une autorisation de push encore à obtenir sont remplacées : l'utilisateur a autorisé ces publications et les pushes ont eu lieu. Les passages historiques décrivant des sauvegardes ou des tests non exécutés ne demandent pas de reproduire ces opérations.
+
+Le dernier constat API Vercel avant cette mise à jour documentaire identifie la production `dpl_BUZLWW4VrASXnHRpajGzroMeSbEq`, état `READY`, commit source `b7e55722ca6416d6a2d9c1ac44485773b270edc6`. Ce constat prouve l'état du déploiement, pas un nouveau parcours utilisateur ou une opération métier. Les changements documentaires suivants restent à distinguer de cette preuve datée. Le suivi CI n'est plus demandé dans cette clôture.
+
 Mise à jour : 27 octobre 2026. Ce fichier permet de reprendre le projet dans un nouveau chat.
 Il est temporaire et peut être supprimé après transmission.
 
