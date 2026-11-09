@@ -4,10 +4,13 @@ import { GET } from "./route";
 
 const mocks = vi.hoisted(() => ({
   sql: vi.fn(),
+  transaction: vi.fn(),
   getAuthenticatedUserId: vi.fn(),
 }));
 
-vi.mock("@/lib/db", () => ({ default: mocks.sql }));
+vi.mock("@/lib/db", () => ({
+  default: Object.assign(mocks.sql, { transaction: mocks.transaction }),
+}));
 vi.mock("@/lib/session", () => ({
   getAuthenticatedUserId: mocks.getAuthenticatedUserId,
 }));
@@ -15,6 +18,9 @@ vi.mock("@/lib/session", () => ({
 beforeEach(() => {
   vi.useFakeTimers();
   mocks.sql.mockReset();
+  mocks.transaction
+    .mockReset()
+    .mockImplementation(async (queries) => Promise.all(queries(mocks.sql)));
   mocks.getAuthenticatedUserId.mockReset().mockReturnValue(1);
 });
 
@@ -42,6 +48,7 @@ it("espace les lectures seul, les accélère à deux et les arrête à la fermet
     expect(decoder.decode(presence.value)).toContain('"otherOnline":false');
 
     expect(mocks.sql).toHaveBeenCalledTimes(2);
+    expect(mocks.transaction).toHaveBeenCalledTimes(1);
     otherOnline = true;
     await vi.advanceTimersByTimeAsync(3_999);
     expect(mocks.sql).toHaveBeenCalledTimes(2);
@@ -52,11 +59,13 @@ it("espace les lectures seul, les accélère à deux et les arrête à la fermet
     expect(decoder.decode(online.value)).toContain('"otherOnline":true');
     await vi.advanceTimersByTimeAsync(1_000);
     expect(mocks.sql).toHaveBeenCalledTimes(6);
+    expect(mocks.transaction).toHaveBeenCalledTimes(3);
   } finally {
     await reader.cancel();
   }
   await vi.advanceTimersByTimeAsync(30_000);
   expect(mocks.sql).toHaveBeenCalledTimes(6);
+  expect(mocks.transaction).toHaveBeenCalledTimes(3);
 });
 
 it("suspend les lectures de la base tant que le flux est saturé", async () => {
@@ -86,6 +95,7 @@ it("ne consulte pas la base sans session", async () => {
   );
   expect(response.status).toBe(401);
   expect(mocks.sql).not.toHaveBeenCalled();
+  expect(mocks.transaction).not.toHaveBeenCalled();
 });
 
 it("ferme le flux avant le délai de la plateforme même si une requête est en cours", async () => {
@@ -115,7 +125,10 @@ it("arrête les vérifications lorsque la requête HTTP est annulée", async () 
   );
   const reader = response.body!.getReader();
   await reader.read();
+  const signal = mocks.transaction.mock.calls[0][1].fetchOptions.signal;
+  expect(signal.aborted).toBe(false);
   abortController.abort();
+  expect(signal.aborted).toBe(true);
   await vi.advanceTimersByTimeAsync(60_000);
   expect(mocks.sql).toHaveBeenCalledTimes(2);
   expect(vi.getTimerCount()).toBe(0);

@@ -12,6 +12,7 @@ const ACTIVE_POLL_INTERVAL_MS = 1_000;
 const IDLE_POLL_INTERVAL_MS = 4_000;
 const PRESENCE_TIMEOUT_SECONDS = 25;
 const KEEPALIVE_INTERVAL_MS = 15_000;
+const POLL_TIMEOUT_MS = 10_000;
 const STREAM_LIFETIME_MS = maxDuration * 1_000 - 15_000;
 
 export async function GET(request: NextRequest) {
@@ -24,6 +25,7 @@ export async function GET(request: NextRequest) {
     start(controller) {
       let cancelled = false;
       let pollTimer: ReturnType<typeof setTimeout> | undefined;
+      const pollAbort = new AbortController();
       const encoder = new TextEncoder();
       let lastMessageHash = "";
       let lastPresenceHash = "";
@@ -49,8 +51,13 @@ export async function GET(request: NextRequest) {
         }
         let nextPollDelay = IDLE_POLL_INTERVAL_MS;
         try {
-          const [messageRows, otherRows] = await Promise.all([
-            sql`
+          const signal = AbortSignal.any([
+            pollAbort.signal,
+            AbortSignal.timeout(POLL_TIMEOUT_MS),
+          ]);
+          const [messageRows, otherRows] = await sql.transaction(
+            (query) => [
+              query`
               WITH marked_read AS (
                 UPDATE messages m SET is_read = TRUE, updated_at = NOW()
                 WHERE m.sender_id != ${userId} AND m.is_read = FALSE
@@ -79,7 +86,7 @@ export async function GET(request: NextRequest) {
               ORDER BY m.id DESC
               LIMIT ${PAGE_FETCH_SIZE}
             `,
-            sql`
+              query`
               SELECT u.label, p.is_typing,
                 (p.is_online AND p.is_tab_visible AND
                   p.last_seen > NOW() - (${PRESENCE_TIMEOUT_SECONDS} * INTERVAL '1 second')) AS really_online
@@ -89,7 +96,10 @@ export async function GET(request: NextRequest) {
               ORDER BY p.user_id
               LIMIT 1
             `,
-          ]);
+            ],
+            { fetchOptions: { signal } },
+          );
+          if (cancelled) return;
 
           const hasMore = messageRows.length > PAGE_SIZE;
           const visibleMessages = messageRows.slice(0, PAGE_SIZE).reverse();
@@ -129,7 +139,9 @@ export async function GET(request: NextRequest) {
             send("presence", { otherOnline, otherTyping, otherLabel });
           }
         } catch (error) {
-          console.error("Échec du polling du flux de messages", error);
+          if (!cancelled) {
+            console.error("Échec du polling du flux de messages", error);
+          }
         } finally {
           if (!cancelled) pollTimer = setTimeout(poll, nextPollDelay);
         }
@@ -158,6 +170,7 @@ export async function GET(request: NextRequest) {
 
       cleanup = () => {
         cancelled = true;
+        pollAbort.abort();
         clearTimeout(pollTimer);
         clearInterval(keepaliveTimer);
         clearTimeout(lifetimeTimer);

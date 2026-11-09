@@ -17,6 +17,8 @@ function getSqlClient(): SqlClient {
 
 const sql = ((strings: TemplateStringsArray, ...values: unknown[]) =>
   getSqlClient()(strings, ...values)) as SqlClient;
+sql.transaction = (queries, options) =>
+  getSqlClient().transaction(queries, options);
 
 export default sql;
 
