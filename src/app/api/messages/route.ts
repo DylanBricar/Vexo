@@ -3,14 +3,19 @@ import sql from "@/lib/db";
 import { decryptOrNull, encryptOrNull } from "@/lib/crypto";
 import {
   MAX_CONTENT_LENGTH,
+  MAX_MEDIA_BYTES,
   validateMessagePayload,
 } from "@/lib/message-validation";
+import { readJsonBody } from "@/lib/request-body";
 import { getAuthenticatedUserId, isTrustedMutation } from "@/lib/session";
 
 export const maxDuration = 60;
 
 const PAGE_SIZE = 50;
 const PAGE_FETCH_SIZE = PAGE_SIZE + 1;
+const MAX_MESSAGE_FIELDS_BYTES = 64 * 1024;
+const MAX_UPLOAD_BODY_BYTES =
+  4 * Math.ceil(MAX_MEDIA_BYTES / 3) + MAX_MESSAGE_FIELDS_BYTES;
 
 export async function GET(request: NextRequest) {
   try {
@@ -75,7 +80,9 @@ export async function POST(request: NextRequest) {
     const userId = getAuthenticatedUserId(request);
     if (!userId) return unauthorized();
 
-    const validation = validateMessagePayload(await request.json());
+    const parsed = await readJsonBody(request, MAX_UPLOAD_BODY_BYTES);
+    if (!parsed.ok) return parsed.response;
+    const validation = validateMessagePayload(parsed.value);
     if (!validation.ok) {
       return NextResponse.json(
         { error: validation.error },
@@ -124,7 +131,9 @@ export async function PATCH(request: NextRequest) {
   try {
     const userId = getAuthenticatedUserId(request);
     if (!userId) return unauthorized();
-    const body: unknown = await request.json();
+    const parsed = await readJsonBody(request, MAX_MESSAGE_FIELDS_BYTES);
+    if (!parsed.ok) return parsed.response;
+    const body = parsed.value;
     if (!body || typeof body !== "object") return invalidRequest();
 
     const { messageId, content } = body as {
@@ -170,7 +179,9 @@ export async function DELETE(request: NextRequest) {
   try {
     const userId = getAuthenticatedUserId(request);
     if (!userId) return unauthorized();
-    const body: unknown = await request.json();
+    const parsed = await readJsonBody(request, MAX_MESSAGE_FIELDS_BYTES);
+    if (!parsed.ok) return parsed.response;
+    const body = parsed.value;
     const messageId =
       body && typeof body === "object" && "messageId" in body
         ? (body as { messageId?: unknown }).messageId

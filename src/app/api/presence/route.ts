@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import sql from "@/lib/db";
+import { readJsonBody } from "@/lib/request-body";
 import { getAuthenticatedUserId, isTrustedMutation } from "@/lib/session";
+
+const MAX_PRESENCE_BODY_BYTES = 1024;
 
 export async function POST(request: NextRequest) {
   if (!isTrustedMutation(request)) {
@@ -15,7 +18,9 @@ export async function POST(request: NextRequest) {
     if (!userId)
       return NextResponse.json({ error: "Non autorisé" }, { status: 401 });
 
-    const body: unknown = await request.json();
+    const parsed = await readJsonBody(request, MAX_PRESENCE_BODY_BYTES);
+    if (!parsed.ok) return parsed.response;
+    const body = parsed.value;
     if (!body || typeof body !== "object") {
       return NextResponse.json({ error: "Requête invalide" }, { status: 400 });
     }

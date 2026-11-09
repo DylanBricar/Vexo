@@ -6,6 +6,9 @@ import type { Message } from "@/types";
 const JSON_HEADERS = { "Content-Type": "application/json" };
 const ERROR_DURATION_MS = 4_000;
 const TYPING_IDLE_MS = 1_500;
+const PRESENCE_HEARTBEAT_MS = 10_000;
+const STREAM_RETRY_INITIAL_MS = 2_000;
+const STREAM_RETRY_MAX_MS = 30_000;
 const SCREENSHOT_NOTICE_COOLDOWN_MS = 10_000;
 
 export function useChat() {
@@ -34,9 +37,8 @@ export function useChat() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const cameraInputRef = useRef<HTMLInputElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
-  const eventSourceRef = useRef<EventSource | null>(null);
-  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const heartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const stopActivityRef = useRef<(() => void) | null>(null);
+  const sessionVersionRef = useRef(0);
   const typingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const errorTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const animationTimersRef = useRef<Set<ReturnType<typeof setTimeout>>>(
@@ -48,7 +50,6 @@ export function useChat() {
   const beaconSentRef = useRef(false);
   const lastScreenshotAlertRef = useRef(0);
   const isLoadingMoreRef = useRef(false);
-  const tabVisibleRef = useRef(true);
   const typingActiveRef = useRef(false);
   const optimisticIdRef = useRef(-1);
   const canBypass = userId === 1;
@@ -92,6 +93,7 @@ export function useChat() {
       mediaFetchingRef.current.has(messageId)
     )
       return;
+    const sessionVersion = sessionVersionRef.current;
     mediaFetchingRef.current.add(messageId);
     void fetch(`/api/messages/media?id=${messageId}`)
       .then(async (response) => {
@@ -99,7 +101,11 @@ export function useChat() {
         return response.json();
       })
       .then((data: { media?: unknown }) => {
-        if (typeof data.media !== "string") return;
+        if (
+          sessionVersion !== sessionVersionRef.current ||
+          typeof data.media !== "string"
+        )
+          return;
         mediaCacheRef.current.set(messageId, data.media);
         setMessages((current) =>
           current.map((message) =>
@@ -110,7 +116,10 @@ export function useChat() {
         );
       })
       .catch(() => undefined)
-      .finally(() => mediaFetchingRef.current.delete(messageId));
+      .finally(() => {
+        if (sessionVersion === sessionVersionRef.current)
+          mediaFetchingRef.current.delete(messageId);
+      });
   }, []);
 
   const animateMessages = useCallback((messageIds: Set<number>) => {
@@ -153,15 +162,78 @@ export function useChat() {
     [animateMessages, fetchMedia],
   );
 
+  const resetSession = useCallback(() => {
+    sessionVersionRef.current++;
+    stopActivityRef.current?.();
+    mediaCacheRef.current.clear();
+    mediaFetchingRef.current.clear();
+    previousMessageIdsRef.current.clear();
+    setUserId(null);
+    setUserLabel("");
+    setMessages([]);
+    setPassword("");
+    setNewMessage("");
+    setReplyTo(null);
+    setEditingMsg(null);
+    setMediaPreview(null);
+    setMediaType(null);
+    setLightboxSrc(null);
+    setOtherOnline(false);
+    setOtherTyping(false);
+    setOtherLabel("");
+    setHasMore(false);
+    setLoadingMore(false);
+    isLoadingMoreRef.current = false;
+    setSavingEdit(false);
+  }, []);
+
+  const postPresence = useCallback(
+    (isTyping: boolean, isTabVisible = true) => {
+      const stopActivity = stopActivityRef.current;
+      if (
+        !userId ||
+        !stopActivity ||
+        (isTabVisible && document.visibilityState !== "visible")
+      )
+        return;
+      const sessionVersion = sessionVersionRef.current;
+      void fetch("/api/presence", {
+        method: "POST",
+        headers: JSON_HEADERS,
+        body: JSON.stringify({ isTyping, isTabVisible }),
+        keepalive: !isTabVisible,
+      })
+        .then((response) => {
+          if (
+            response.status !== 401 ||
+            stopActivity !== stopActivityRef.current ||
+            sessionVersion !== sessionVersionRef.current
+          )
+            return;
+          resetSession();
+          showError("Ta session a expiré. Reconnecte-toi.");
+        })
+        .catch(() => undefined);
+    },
+    [resetSession, showError, userId],
+  );
+
   useEffect(() => {
     if (!userId) return;
-    let disposed = false;
+    let eventSource: EventSource | null = null;
+    let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+    let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
+    let reconnectDelay = STREAM_RETRY_INITIAL_MS;
 
     const connect = () => {
-      if (disposed) return;
-      const eventSource = new EventSource("/api/messages/stream");
-      eventSourceRef.current = eventSource;
-      eventSource.addEventListener("messages", (event) => {
+      if (document.visibilityState !== "visible") return;
+      const source = new EventSource("/api/messages/stream");
+      eventSource = source;
+      source.onopen = () => {
+        reconnectDelay = STREAM_RETRY_INITIAL_MS;
+      };
+      source.addEventListener("messages", (event) => {
+        if (eventSource !== source) return;
         try {
           const data = JSON.parse(event.data) as {
             messages?: Message[];
@@ -175,7 +247,8 @@ export function useChat() {
           showError("Le flux de messages a envoyé une réponse invalide");
         }
       });
-      eventSource.addEventListener("presence", (event) => {
+      source.addEventListener("presence", (event) => {
+        if (eventSource !== source) return;
         try {
           const data = JSON.parse(event.data) as Record<string, unknown>;
           setOtherOnline(Boolean(data.otherOnline));
@@ -187,50 +260,50 @@ export function useChat() {
           showError("Le statut de présence est invalide");
         }
       });
-      eventSource.onerror = () => {
-        eventSource.close();
-        if (!disposed) reconnectTimerRef.current = setTimeout(connect, 2_000);
+      source.onerror = () => {
+        if (eventSource !== source) return;
+        source.close();
+        eventSource = null;
+        if (document.visibilityState !== "visible") return;
+        reconnectTimer = setTimeout(connect, reconnectDelay);
+        reconnectDelay = Math.min(reconnectDelay * 2, STREAM_RETRY_MAX_MS);
       };
     };
 
-    connect();
-    return () => {
-      disposed = true;
-      if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
-      eventSourceRef.current?.close();
-      eventSourceRef.current = null;
+    const stopSync = () => {
+      clearTimeout(reconnectTimer);
+      clearInterval(heartbeatTimer);
+      clearTimeout(typingTimeoutRef.current ?? undefined);
+      heartbeatTimer = undefined;
+      typingActiveRef.current = false;
+      eventSource?.close();
+      eventSource = null;
     };
-  }, [processMessages, showError, userId]);
 
-  const postPresence = useCallback(
-    (isTyping: boolean) => {
-      if (!userId) return;
-      void fetch("/api/presence", {
-        method: "POST",
-        headers: JSON_HEADERS,
-        body: JSON.stringify({ isTyping, isTabVisible: tabVisibleRef.current }),
-      }).catch(() => undefined);
-    },
-    [userId],
-  );
+    const syncVisibility = () => {
+      if (document.visibilityState !== "visible") {
+        if (heartbeatTimer !== undefined) postPresence(false, false);
+        stopSync();
+      } else if (heartbeatTimer === undefined) {
+        reconnectDelay = STREAM_RETRY_INITIAL_MS;
+        const heartbeat = () => postPresence(typingActiveRef.current);
+        heartbeat();
+        connect();
+        heartbeatTimer = setInterval(heartbeat, PRESENCE_HEARTBEAT_MS);
+      }
+    };
 
-  useEffect(() => {
-    if (!userId) return;
-    tabVisibleRef.current = document.visibilityState === "visible";
-    const heartbeat = () => postPresence(typingActiveRef.current);
-    const onVisibilityChange = () => {
-      tabVisibleRef.current = document.visibilityState === "visible";
-      heartbeat();
+    const stopActivity = () => {
+      document.removeEventListener("visibilitychange", syncVisibility);
+      stopSync();
+      if (stopActivityRef.current === stopActivity)
+        stopActivityRef.current = null;
     };
-    document.addEventListener("visibilitychange", onVisibilityChange);
-    heartbeat();
-    heartbeatRef.current = setInterval(heartbeat, 3_000);
-    return () => {
-      document.removeEventListener("visibilitychange", onVisibilityChange);
-      if (heartbeatRef.current) clearInterval(heartbeatRef.current);
-      heartbeatRef.current = null;
-    };
-  }, [postPresence, userId]);
+    stopActivityRef.current = stopActivity;
+    document.addEventListener("visibilitychange", syncVisibility);
+    syncVisibility();
+    return stopActivity;
+  }, [postPresence, processMessages, showError, userId]);
 
   const handleInputChange = useCallback(
     (value: string) => {
@@ -262,7 +335,7 @@ export function useChat() {
     const disconnect = () => {
       if (beaconSentRef.current) return;
       beaconSentRef.current = true;
-      eventSourceRef.current?.close();
+      stopActivityRef.current?.();
       const sent = navigator.sendBeacon(
         "/api/disconnect",
         new Blob(["{}"], { type: "application/json" }),
@@ -276,18 +349,24 @@ export function useChat() {
         }).catch(() => undefined);
       }
     };
+    const restore = (event: PageTransitionEvent) => {
+      if (event.persisted) resetSession();
+    };
     window.addEventListener("pagehide", disconnect);
+    window.addEventListener("pageshow", restore);
     return () => {
       window.removeEventListener("pagehide", disconnect);
+      window.removeEventListener("pageshow", restore);
       beaconSentRef.current = false;
     };
-  }, [userId]);
+  }, [resetSession, userId]);
 
   const loadMore = useCallback(async () => {
     if (!userId || loadingMore || messages.length === 0) return;
     const oldestServerMessage = messages.find((message) => message.id > 0);
     if (!oldestServerMessage) return;
 
+    const sessionVersion = sessionVersionRef.current;
     setLoadingMore(true);
     isLoadingMoreRef.current = true;
     const viewport = messagesEndRef.current?.closest<HTMLElement>(
@@ -303,6 +382,7 @@ export function useChat() {
         messages?: Message[];
         hasMore?: boolean;
       };
+      if (sessionVersion !== sessionVersionRef.current) return;
       const older = Array.isArray(data.messages) ? data.messages : [];
       for (const message of older) {
         previousMessageIdsRef.current.add(message.id);
@@ -317,15 +397,18 @@ export function useChat() {
       });
       setHasMore(Boolean(data.hasMore));
       requestAnimationFrame(() => {
+        if (sessionVersion !== sessionVersionRef.current) return;
         if (viewport)
           viewport.scrollTop = viewport.scrollHeight - previousScrollHeight;
         isLoadingMoreRef.current = false;
       });
     } catch {
-      showError("Erreur lors du chargement");
-      isLoadingMoreRef.current = false;
+      if (sessionVersion === sessionVersionRef.current) {
+        showError("Erreur lors du chargement");
+        isLoadingMoreRef.current = false;
+      }
     } finally {
-      setLoadingMore(false);
+      if (sessionVersion === sessionVersionRef.current) setLoadingMore(false);
     }
   }, [fetchMedia, loadingMore, messages, showError, userId]);
 
@@ -363,6 +446,7 @@ export function useChat() {
     async (message: Message) => {
       const content = newMessage.trim();
       if (!content || savingEdit) return;
+      const sessionVersion = sessionVersionRef.current;
       const previousContent = message.content;
       setSavingEdit(true);
       setMessages((current) =>
@@ -380,6 +464,7 @@ export function useChat() {
         });
         if (!response.ok) throw new Error("Modification refusée");
       } catch {
+        if (sessionVersion !== sessionVersionRef.current) return;
         setMessages((current) =>
           current.map((item) =>
             item.id === message.id
@@ -391,7 +476,7 @@ export function useChat() {
         setNewMessage(content);
         showError("Erreur lors de la modification");
       } finally {
-        setSavingEdit(false);
+        if (sessionVersion === sessionVersionRef.current) setSavingEdit(false);
       }
     },
     [newMessage, savingEdit, showError],
@@ -409,6 +494,7 @@ export function useChat() {
     const media = mediaPreview;
     const currentMediaType = mediaType;
     const currentReply = replyTo;
+    const sessionVersion = sessionVersionRef.current;
     const optimisticId = optimisticIdRef.current--;
     const optimisticMessage: Message = {
       id: optimisticId,
@@ -448,6 +534,7 @@ export function useChat() {
         error?: string;
         message?: Message;
       };
+      if (sessionVersion !== sessionVersionRef.current) return;
       if (!response.ok || !data.message)
         throw new Error(data.error || "Envoi refusé");
 
@@ -470,6 +557,7 @@ export function useChat() {
         ];
       });
     } catch (sendError) {
+      if (sessionVersion !== sessionVersionRef.current) return;
       setMessages((current) =>
         current.filter((message) => message.id !== optimisticId),
       );
@@ -498,6 +586,7 @@ export function useChat() {
 
   const handleDelete = useCallback(
     async (messageId: number) => {
+      const sessionVersion = sessionVersionRef.current;
       const removed = messages.find((message) => message.id === messageId);
       setMessages((current) =>
         current.filter((message) => message.id !== messageId),
@@ -509,8 +598,10 @@ export function useChat() {
           body: JSON.stringify({ messageId }),
         });
         if (!response.ok) throw new Error("Suppression refusée");
-        mediaCacheRef.current.delete(messageId);
+        if (sessionVersion === sessionVersionRef.current)
+          mediaCacheRef.current.delete(messageId);
       } catch {
+        if (sessionVersion !== sessionVersionRef.current) return;
         if (removed)
           setMessages((current) =>
             [...current, removed].sort((a, b) => a.id - b.id),
@@ -559,9 +650,14 @@ export function useChat() {
         return;
       }
 
+      const sessionVersion = sessionVersionRef.current;
       const reader = new FileReader();
       reader.onload = () => {
-        if (typeof reader.result !== "string") return;
+        if (
+          sessionVersion !== sessionVersionRef.current ||
+          typeof reader.result !== "string"
+        )
+          return;
         setMediaPreview(reader.result);
         setMediaType(file.type.startsWith("image/") ? "image" : "video");
       };
@@ -571,29 +667,18 @@ export function useChat() {
     [showError],
   );
 
-  const resetSession = useCallback(() => {
-    mediaCacheRef.current.clear();
-    mediaFetchingRef.current.clear();
-    previousMessageIdsRef.current.clear();
-    setUserId(null);
-    setUserLabel("");
-    setMessages([]);
-    setPassword("");
-    setReplyTo(null);
-    setEditingMsg(null);
-    setMediaPreview(null);
-    setMediaType(null);
-  }, []);
-
   const handleDisconnect = useCallback(async () => {
-    eventSourceRef.current?.close();
-    if (heartbeatRef.current) clearInterval(heartbeatRef.current);
+    if (beaconSentRef.current) return;
+    beaconSentRef.current = true;
+    stopActivityRef.current?.();
     try {
-      await fetch("/api/disconnect", {
+      const response = await fetch("/api/disconnect", {
         method: "POST",
         headers: JSON_HEADERS,
         body: "{}",
+        keepalive: true,
       });
+      if (!response.ok) throw new Error("Déconnexion refusée");
     } catch {
       showError("La déconnexion distante a échoué");
     } finally {

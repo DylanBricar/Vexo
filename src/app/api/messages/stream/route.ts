@@ -8,19 +8,22 @@ export const maxDuration = 300;
 
 const PAGE_SIZE = 50;
 const PAGE_FETCH_SIZE = PAGE_SIZE + 1;
-const POLL_INTERVAL_MS = 1_000;
+const ACTIVE_POLL_INTERVAL_MS = 1_000;
+const IDLE_POLL_INTERVAL_MS = 4_000;
+const PRESENCE_TIMEOUT_SECONDS = 25;
 const KEEPALIVE_INTERVAL_MS = 15_000;
+const STREAM_LIFETIME_MS = maxDuration * 1_000 - 15_000;
 
 export async function GET(request: NextRequest) {
   const userId = getAuthenticatedUserId(request);
   if (!userId) return new Response("Non autorisé", { status: 401 });
 
-  let cancelled = false;
-  let pollTimer: ReturnType<typeof setTimeout> | null = null;
-  let keepaliveTimer: ReturnType<typeof setInterval> | null = null;
+  let cleanup = () => {};
 
   const stream = new ReadableStream({
-    async start(controller) {
+    start(controller) {
+      let cancelled = false;
+      let pollTimer: ReturnType<typeof setTimeout> | undefined;
       const encoder = new TextEncoder();
       let lastMessageHash = "";
       let lastPresenceHash = "";
@@ -38,8 +41,13 @@ export async function GET(request: NextRequest) {
         }
       };
 
-      const poll = async () => {
+      const poll = async (initial = false) => {
         if (cancelled) return;
+        if (!initial && (controller.desiredSize ?? 0) <= 0) {
+          pollTimer = setTimeout(poll, IDLE_POLL_INTERVAL_MS);
+          return;
+        }
+        let nextPollDelay = IDLE_POLL_INTERVAL_MS;
         try {
           const [messageRows, otherRows] = await Promise.all([
             sql`
@@ -50,7 +58,8 @@ export async function GET(request: NextRequest) {
                   AND (m.expires_at IS NULL OR m.expires_at > NOW())
                   AND EXISTS (
                     SELECT 1 FROM presence p
-                    WHERE p.user_id = ${userId} AND p.is_tab_visible = TRUE
+                    WHERE p.user_id = ${userId} AND p.is_online = TRUE AND p.is_tab_visible = TRUE
+                      AND p.last_seen > NOW() - (${PRESENCE_TIMEOUT_SECONDS} * INTERVAL '1 second')
                   )
                   AND NOT EXISTS (
                     SELECT 1 FROM message_hidden_for h
@@ -72,7 +81,8 @@ export async function GET(request: NextRequest) {
             `,
             sql`
               SELECT u.label, p.is_typing,
-                (p.is_online AND p.is_tab_visible AND p.last_seen > NOW() - INTERVAL '8 seconds') AS really_online
+                (p.is_online AND p.is_tab_visible AND
+                  p.last_seen > NOW() - (${PRESENCE_TIMEOUT_SECONDS} * INTERVAL '1 second')) AS really_online
               FROM presence p
               JOIN users u ON u.id = p.user_id
               WHERE p.user_id != ${userId}
@@ -83,12 +93,11 @@ export async function GET(request: NextRequest) {
 
           const hasMore = messageRows.length > PAGE_SIZE;
           const visibleMessages = messageRows.slice(0, PAGE_SIZE).reverse();
-          const messageHash = visibleMessages
+          const messageHash = `${hasMore}:${visibleMessages
             .map(
-              (message) =>
-                `${message.id}:${message.is_read}:${message.updated_at}`,
+              ({ id, is_read, updated_at }) => `${id}:${is_read}:${updated_at}`,
             )
-            .join(",");
+            .join(",")}`;
           if (messageHash !== lastMessageHash) {
             lastMessageHash = messageHash;
             send("messages", {
@@ -110,6 +119,7 @@ export async function GET(request: NextRequest) {
 
           const other = otherRows[0];
           const otherOnline = Boolean(other?.really_online);
+          if (otherOnline) nextPollDelay = ACTIVE_POLL_INTERVAL_MS;
           const otherTyping = Boolean(other?.is_typing && otherOnline);
           const otherLabel =
             typeof other?.label === "string" ? other.label : "";
@@ -118,49 +128,47 @@ export async function GET(request: NextRequest) {
             lastPresenceHash = presenceHash;
             send("presence", { otherOnline, otherTyping, otherLabel });
           }
-
-          if (other && !otherOnline) {
-            await sql`
-              UPDATE presence SET is_online = FALSE, is_typing = FALSE, is_tab_visible = FALSE
-              WHERE user_id != ${userId} AND last_seen < NOW() - INTERVAL '10 seconds'
-            `;
-          }
         } catch (error) {
           console.error("Échec du polling du flux de messages", error);
         } finally {
-          if (!cancelled) pollTimer = setTimeout(poll, POLL_INTERVAL_MS);
+          if (!cancelled) pollTimer = setTimeout(poll, nextPollDelay);
         }
       };
 
-      const cleanup = () => {
+      const close = () => {
         if (cancelled) return;
-        cancelled = true;
-        if (pollTimer) clearTimeout(pollTimer);
-        if (keepaliveTimer) clearInterval(keepaliveTimer);
+        cleanup();
+        controller.close();
       };
 
-      request.signal.addEventListener("abort", cleanup, { once: true });
-      try {
-        controller.enqueue(encoder.encode(": connected\n\n"));
-      } catch {
-        cleanup();
+      if (request.signal.aborted) {
+        controller.close();
         return;
       }
 
-      keepaliveTimer = setInterval(() => {
-        if (cancelled) return;
+      const lifetimeTimer = setTimeout(close, STREAM_LIFETIME_MS);
+      const keepaliveTimer = setInterval(() => {
+        if (cancelled || (controller.desiredSize ?? 0) <= 0) return;
         try {
           controller.enqueue(encoder.encode(": keepalive\n\n"));
         } catch {
           cleanup();
         }
       }, KEEPALIVE_INTERVAL_MS);
-      await poll();
+
+      cleanup = () => {
+        cancelled = true;
+        clearTimeout(pollTimer);
+        clearInterval(keepaliveTimer);
+        clearTimeout(lifetimeTimer);
+        request.signal.removeEventListener("abort", close);
+      };
+      request.signal.addEventListener("abort", close, { once: true });
+      controller.enqueue(encoder.encode(": connected\n\n"));
+      void poll(true);
     },
     cancel() {
-      cancelled = true;
-      if (pollTimer) clearTimeout(pollTimer);
-      if (keepaliveTimer) clearInterval(keepaliveTimer);
+      cleanup();
     },
   });
 

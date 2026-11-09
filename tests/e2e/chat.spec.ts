@@ -37,6 +37,103 @@ test("l'envoi est optimiste et affiche la date complete", async ({ page }) => {
   });
 });
 
+test("l'onglet masqué suspend la présence et la reconnexion du flux", async ({
+  page,
+}) => {
+  await page.clock.install();
+  await mockChat(page, 0);
+  const visibilityUpdates: boolean[] = [];
+  let streamRequests = 0;
+  page.on("request", (request) => {
+    if (request.url().endsWith("/api/presence")) {
+      visibilityUpdates.push(request.postDataJSON().isTabVisible);
+    }
+    if (request.url().endsWith("/api/messages/stream")) streamRequests++;
+  });
+  await login(page);
+  await expect(page.getByText(initialMessage.content)).toBeVisible();
+  await expect.poll(() => visibilityUpdates).toEqual([true]);
+
+  await setChatVisibility(page, "hidden");
+  await expect.poll(() => visibilityUpdates).toEqual([true, false]);
+  const streamRequestsAtHide = streamRequests;
+  await page.clock.fastForward(21_000);
+  expect(visibilityUpdates).toEqual([true, false]);
+  expect(streamRequests).toBe(streamRequestsAtHide);
+
+  await setChatVisibility(page, "visible");
+  await expect.poll(() => visibilityUpdates).toEqual([true, false, true]);
+  await expect.poll(() => streamRequests).toBeGreaterThan(streamRequestsAtHide);
+});
+
+test("une session expirée arrête le trafic et revient à la connexion", async ({
+  page,
+}) => {
+  await page.clock.install();
+  await mockChat(page, 0);
+  let presenceRequests = 0;
+  let streamRequests = 0;
+  await page.route("**/api/presence", (route) => {
+    presenceRequests++;
+    return route.fulfill({ status: 401, json: { error: "Non autorisé" } });
+  });
+  page.on("request", (request) => {
+    if (request.url().endsWith("/api/messages/stream")) streamRequests++;
+  });
+  await page.goto("/");
+  await page.getByPlaceholder("Mot de passe").fill("correct-password");
+  await page.getByRole("button", { name: "Entrer" }).click();
+  await expect(
+    page.getByText("Ta session a expiré. Reconnecte-toi."),
+  ).toBeVisible();
+  await expect(page.getByPlaceholder("Mot de passe")).toBeVisible();
+
+  const streamRequestsAtExpiry = streamRequests;
+  await page.clock.fastForward(31_000);
+  expect(presenceRequests).toBe(1);
+  expect(streamRequests).toBe(streamRequestsAtExpiry);
+});
+
+async function setChatVisibility(
+  page: Page,
+  visibility: DocumentVisibilityState,
+) {
+  await page.evaluate((state) => {
+    Object.defineProperty(document, "visibilityState", {
+      value: state,
+      configurable: true,
+    });
+    document.dispatchEvent(new Event("visibilitychange"));
+  }, visibility);
+}
+
+test("un retour arrière après avoir quitté demande une nouvelle connexion", async ({
+  page,
+}) => {
+  await mockChat(page, 0);
+  await page.route("**/api/disconnect", (route) =>
+    route.fulfill({ json: { ok: true } }),
+  );
+  await login(page);
+  await expect(page.getByText(initialMessage.content)).toBeVisible();
+
+  const disconnect = page.waitForRequest("**/api/disconnect");
+  await page.evaluate(() =>
+    window.dispatchEvent(
+      new PageTransitionEvent("pagehide", { persisted: true }),
+    ),
+  );
+  await disconnect;
+  await page.evaluate(() =>
+    window.dispatchEvent(
+      new PageTransitionEvent("pageshow", { persisted: true }),
+    ),
+  );
+
+  await expect(page.getByPlaceholder("Mot de passe")).toBeVisible();
+  await expect(page.getByText(initialMessage.content)).toHaveCount(0);
+});
+
 for (const viewport of [
   { width: 320, height: 568 },
   { width: 375, height: 667 },
@@ -144,6 +241,11 @@ test("les pages et API privées refusent l'indexation", async ({ request }) => {
 
   expect(pageResponse.headers()["x-robots-tag"]).toBe(expectedPolicy);
   expect(apiResponse.headers()["x-robots-tag"]).toBe(expectedPolicy);
+  expect(pageResponse.headers()["content-security-policy"]).toMatch(
+    /'nonce-[^']+' 'strict-dynamic'/,
+  );
+  expect(robotsResponse.headers()["x-robots-tag"]).toBe(expectedPolicy);
+  expect(robotsResponse.headers()["content-security-policy"]).toBeUndefined();
   expect(apiResponse.headers()["cache-control"]).toContain("no-store");
   for (const crawler of [
     "GPTBot",

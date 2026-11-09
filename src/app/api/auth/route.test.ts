@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 
 const mocks = vi.hoisted(() => ({
@@ -27,6 +27,7 @@ vi.mock("@/lib/crypto", () => ({
 
 describe("POST /api/auth", () => {
   beforeEach(() => {
+    vi.stubEnv("VERCEL", "");
     vi.resetModules();
     mocks.sql.mockReset().mockResolvedValue([
       { id: 1, password: "hash-1", label: "Utilisateur 1" },
@@ -39,6 +40,8 @@ describe("POST /api/auth", () => {
       .mockReset()
       .mockImplementation(async (hash: string) => hash === "hash-1");
   });
+
+  afterEach(() => vi.unstubAllEnvs());
 
   it("place la session dans un cookie HttpOnly sans exposer le token au client", async () => {
     const { POST } = await import("./route");
@@ -112,13 +115,56 @@ describe("POST /api/auth", () => {
   });
 
   it.each([
+    ["", "unknown"],
+    ["203.0.113.4:443", "unknown"],
+    ["2001:db8:0:42::1", "2001:db8:0:42::/64"],
+    ["2001:db8:0:42:1:2:3:4", "2001:db8:0:42::/64"],
+    ["::ffff:198.51.100.7", "198.51.100.7"],
+  ])("isole la limite de connexion des en-têtes non fiables (%s)", async (ip, key) => {
+    vi.stubEnv("VERCEL", "1");
+    const { POST } = await import("./route");
+    await POST(
+      authRequest(
+        { password: "correct-password" },
+        {
+          ...(ip ? { "x-vercel-forwarded-for": ip } : {}),
+          "x-forwarded-for": "203.0.113.4",
+          "x-real-ip": "203.0.113.4",
+        },
+      ),
+    );
+
+    expect(mocks.checkLoginRateLimit).toHaveBeenCalledWith(key);
+  });
+
+  it.each([
     [{}, 400],
     [{ password: 42 }, 400],
     [{ password: "x".repeat(257) }, 400],
   ])("valide strictement le mot de passe", async (body, status) => {
     const { POST } = await import("./route");
     expect((await POST(authRequest(body))).status).toBe(status);
+    expect(mocks.initDB).not.toHaveBeenCalled();
   });
+
+  it.each([
+    ["{", 400],
+    [JSON.stringify({ password: "x".repeat(4_096) }), 413],
+  ])(
+    "rejette un corps invalide ou trop volumineux avant la base (%s)",
+    async (body, status) => {
+      const { POST } = await import("./route");
+      const request = new NextRequest("https://vexo.example/api/auth", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body,
+      });
+      expect(request.headers.has("content-length")).toBe(false);
+      expect((await POST(request)).status).toBe(status);
+      expect(mocks.initDB).not.toHaveBeenCalled();
+      expect(mocks.checkLoginRateLimit).not.toHaveBeenCalled();
+    },
+  );
 
   it("refuse un mot de passe qui ne correspond à aucun utilisateur", async () => {
     mocks.verifyPassword.mockResolvedValue(false);
